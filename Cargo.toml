@@ -1,0 +1,6 @@
+[package]
+name = "pototo"
+version = "0.1.0"
+authors = ["Dan Sotolongo <dsotolongo@google.com>"]
+
+[dependencies]
