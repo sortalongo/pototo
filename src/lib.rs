@@ -108,35 +108,39 @@ use std::collections::VecDeque;
 
 pub struct LinearBuf<T> {
   deque: VecDeque<FusedBuffer<T>>,
-  current_min: isize,
+  current_min: usize,
 }
-impl<T> for LinearBuf<T> {
-  pub fn new() {
+impl<T> LinearBuf<T> {
+  pub fn new() -> LinearBuf<T> {
     LinearBuf { deque: VecDeque::new(), current_min: 0 }
   }
 }
 impl<T> Consumer<T> for LinearBuf<T> {
-  type InK = isize;
-  type KSet = (isize, isize); // Half-open, lower-inclusive interval.
-  fn put(&mut self, k: isize, t: T) {
+  type InK = usize;
+  type KSet = (usize, usize); // Half-open, lower-inclusive interval.
+  fn put(&mut self, k: usize, t: T) {
     let idx = k - self.current_min;
     let len = self.deque.len();
-    if let Some(&buf) = self.deque.get(idx) {
-      buf.put(t);
+    if self.deque.len() > idx {
+      if let Some(buf) = self.deque.get_mut(idx) {
+        buf.put(t);
+      } else {
+          panic!("Failed getting index {idx} from {self.deque}");
+      }
     } else {
       self.deque.reserve(idx - len + 1);
-      for j in len..idx {
+      for _j in len..idx {
         self.deque.push_back(FusedBuffer::empty());
       }
       self.deque.push_back(FusedBuffer::new(t));
     }
   }
-  fn advance(&mut self, _ks: ()) {}
+  fn advance(&mut self, _ks: (usize, usize)) {}
 }
 impl<T> Producer<Option<T>> for LinearBuf<T> {
   type OutK = ();
   fn get(&mut self) -> ((), Option<T>) {
-    ((), mem::replace(&mut self.elem, None))
+    ((), None)
   }
 }
 impl<T> Processor<T, T> for LinearBuf<T> {}
