@@ -1,13 +1,16 @@
 pub trait Consumer<T> {
-  type K: Copy;
+  type InK: Copy;
   type KSet;
-  fn put(&mut self, k: Self::K, t: T);
+  fn put(&mut self, k: Self::InK, t: T);
   fn advance(&mut self, ks: Self::KSet);
 }
 pub trait Producer<T> {
-  fn get(&mut self) -> T;
+  type OutK: Copy;
+  fn get(&mut self) -> (Self::OutK, T);
 }
-pub trait Processor<I, O> : Consumer<I> + Producer<Option<O>> {}
+pub trait Processor<I, O> : Consumer<I> + Producer<Option<O>> {
+
+}
 pub trait Buffer<T> : Processor<T, T> {}
 
 use std::mem;
@@ -27,7 +30,7 @@ impl<T> FusedBuffer<T> {
   }
 }
 impl<T> Consumer<T> for FusedBuffer<T> {
-  type K = ();
+  type InK = ();
   type KSet = ();
   fn put(&mut self, _k: (), t: T) {
     mem::replace(&mut self.elem, Some(t));
@@ -35,8 +38,9 @@ impl<T> Consumer<T> for FusedBuffer<T> {
   fn advance(&mut self, _ks: ()) {}
 }
 impl<T> Producer<Option<T>> for FusedBuffer<T> {
-  fn get(&mut self) -> Option<T> {
-    mem::replace(&mut self.elem, None)
+  type OutK = ();
+  fn get(&mut self) -> ((), Option<T>) {
+    ((), mem::replace(&mut self.elem, None))
   }
 }
 impl<T> Processor<T, T> for FusedBuffer<T> {}
@@ -45,57 +49,58 @@ impl<T> Buffer<T> for FusedBuffer<T> {}
 #[test]
 fn fused_buffer_inserts() {
     let mut b = FusedBuffer::empty();
-    assert_eq!(None, b.get());
+    assert_eq!(((), None), b.get());
     let i = 5;
     b.put(i);
-    assert_eq!(Some(i), b.get());
-    assert_eq!(None, b.get());
+    assert_eq!(((), Some(i)), b.get());
+    assert_eq!(((), None), b.get());
 }
 
  use std::marker::PhantomData;
 
 pub struct PreFnProcessor<I, O, F, B>
-    where F: Fn(B::K, I) -> O, B: Buffer<O> {
+    where F: Fn(B::InK, I) -> O, B: Buffer<O> {
   f: F,
   buf: B,
   _in: PhantomData<I>,
   _out: PhantomData<O>,
 }
 impl<I, O, F, B> PreFnProcessor<I, O, F, B>
-    where F: Fn(B::K, I) -> O, B: Buffer<O> {
+    where F: Fn(B::InK, I) -> O, B: Buffer<O> {
   pub fn new(f: F, b: B) -> PreFnProcessor<I, O, F, B> {
       PreFnProcessor { _in: PhantomData, _out: PhantomData, f: f, buf: b }
   }
 }
 impl<I, O, F, B> Consumer<I>
     for PreFnProcessor<I, O, F, B>
-    where F: Fn(B::K, I) -> O, B: Buffer<O> {
-  type K = B::K;
+    where F: Fn(B::InK, I) -> O, B: Buffer<O> {
+  type InK = B::InK;
   type KSet = B::KSet;
-  fn put(&mut self, k: B::K, input: I) {
+  fn put(&mut self, k: B::InK, input: I) {
     self.buf.put(k, (self.f)(k, input));
   }
   fn advance(&mut self, _ks: B::KSet) {}
 }
 impl<I, O, F, B> Producer<Option<O>>
     for PreFnProcessor<I, O, F, B>
-    where F: Fn(B::K, I) -> O, B: Buffer<O> {
-  fn get(&mut self) -> Option<O> {
+    where F: Fn(B::InK, I) -> O, B: Buffer<O> {
+  type OutK = B::OutK;
+  fn get(&mut self) -> (B::OutK, Option<O>) {
     self.buf.get()
   }
 }
 impl<I, O, F, B> Processor<I, O>
     for PreFnProcessor<I, O, F, B>
-    where F: Fn(B::K, I) -> O, B: Buffer<O> {}
+    where F: Fn(B::InK, I) -> O, B: Buffer<O> {}
 
 #[test]
 fn prefn_processor_works() {
     let mut fn_b = PreFnProcessor::new(|_k, i| i * 2, FusedBuffer::empty());
-    assert_eq!(None, fn_b.get());
+    assert_eq!(((), None), fn_b.get());
     let i = 5;
     fn_b.put((), i);
-    assert_eq!(Some(i * 2), fn_b.get());
-    assert_eq!(None, fn_b.get());
+    assert_eq!(((), Some(i * 2)), fn_b.get());
+    assert_eq!(((), None), fn_b.get());
 }
 
 use std::collections::VecDeque;
