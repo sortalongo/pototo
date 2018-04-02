@@ -62,6 +62,7 @@ pub struct PreFnProcessor<I, O, F, B>
     where F: Fn(B::InK, I) -> O, B: Buffer<O> {
   f: F,
   buf: B,
+  // Below are just markers for the compiler to track unused types.
   _in: PhantomData<I>,
   _out: PhantomData<O>,
 }
@@ -105,6 +106,40 @@ fn prefn_processor_works() {
 
 use std::collections::VecDeque;
 
-pub struct LinearBuf<T>(VecDeque<T>);
+pub struct LinearBuf<T> {
+  deque: VecDeque<FusedBuffer<T>>,
+  current_min: isize,
+}
+impl<T> for LinearBuf<T> {
+  pub fn new() {
+    LinearBuf { deque: VecDeque::new(), current_min: 0 }
+  }
+}
+impl<T> Consumer<T> for LinearBuf<T> {
+  type InK = isize;
+  type KSet = (isize, isize); // Half-open, lower-inclusive interval.
+  fn put(&mut self, k: isize, t: T) {
+    let idx = k - self.current_min;
+    let len = self.deque.len();
+    if let Some(&buf) = self.deque.get(idx) {
+      buf.put(t);
+    } else {
+      self.deque.reserve(idx - len + 1);
+      for j in len..idx {
+        self.deque.push_back(FusedBuffer::empty());
+      }
+      self.deque.push_back(FusedBuffer::new(t));
+    }
+  }
+  fn advance(&mut self, _ks: ()) {}
+}
+impl<T> Producer<Option<T>> for LinearBuf<T> {
+  type OutK = ();
+  fn get(&mut self) -> ((), Option<T>) {
+    ((), mem::replace(&mut self.elem, None))
+  }
+}
+impl<T> Processor<T, T> for LinearBuf<T> {}
+impl<T> Buffer<T> for LinearBuf<T> {}
 
 
