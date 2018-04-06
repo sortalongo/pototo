@@ -14,6 +14,25 @@ pub trait Producer<T> {
 pub trait Processor<I: Merge, O> : Consumer<I> + Producer<O> {}
 pub trait Buffer<T: Merge> : Processor<T, T> {}
 
+pub trait PointSet {
+  type KSet;
+  fn empty() -> Self::KSet;
+  fn merge_sets(k1: Self::KSet, k2: Self::KSet) -> Self::KSet;
+}
+
+use std::cmp::Ord;
+use std::fmt::Debug;
+#[derive(Copy, Clone, Debug, Eq, Ord, PartialOrd, PartialEq)]
+struct LowerNat(usize);
+
+impl PointSet for LowerNat {
+  type KSet = LowerNat;
+  fn empty() -> LowerNat { LowerNat(0) }
+  fn merge_sets(n1: LowerNat, n2: LowerNat) -> LowerNat {
+    std::cmp::max(n1, n2)
+  }
+}
+
 use std::mem;
 
 pub struct FusedBuffer<T> {
@@ -144,7 +163,7 @@ impl<T> LinearBuf<T> {
     LinearBuf { deque: VecDeque::new(), buffer_min: 0, complete_min: 0 }
   }
 }
-use std::fmt::Debug;
+
 impl<T: Merge + Debug> Consumer<T> for LinearBuf<T> {
   type InK = usize;
   type KSet = usize; // minimum unfinished index.
@@ -212,5 +231,89 @@ fn linear_buf_works() {
   assert_eq!(Some((1, "1".to_string())), buf.get());
   assert_eq!(Some((2, "2".to_string())), buf.get());
   assert_eq!(None, buf.get());
+}
+
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+
+#[derive(Copy, Clone, Debug, Eq, Ord, PartialOrd, PartialEq)]
+pub enum Boundary<K> { Open(K), Closed(K) }
+impl<K> Boundary<K> {
+  pub fn value(&self) -> K where K: Clone {
+    match self {
+      &Boundary::Open(ref k) => k.clone(),
+      &Boundary::Closed(ref k) => k.clone(),
+    }
+  }
+}
+
+#[derive(Copy, Clone, Debug, Eq, Ord, PartialOrd, PartialEq)]
+pub struct Interval<K: Ord> {
+  lower: Boundary<K>,
+  upper: Boundary<K>
+}
+impl<K> Interval<K> where K: Ord + Clone + Debug {
+  fn check_order(lower: &K, upper: &K) {
+    if lower > upper {
+        panic!("Interval: {lower} must be <= {upper}.");
+    }
+  }
+
+  pub fn open(lower: K, upper: K) -> Interval<K> {
+    Interval::check_order(&lower, &upper);
+    Interval {
+        lower: Boundary::Open(lower),
+        upper: Boundary::Open(upper), }
+  }
+  pub fn closed(lower: K, upper: K) -> Interval<K> {
+    Interval::check_order(&lower, &upper);
+    Interval {
+        lower: Boundary::Closed(lower),
+        upper: Boundary::Closed(upper), }
+  }
+  pub fn closed_open(lower: K, upper: K) -> Interval<K> {
+    Interval::check_order(&lower, &upper);
+    Interval {
+        lower: Boundary::Closed(lower),
+        upper: Boundary::Open(upper), }
+  }
+  pub fn open_closed(lower: K, upper: K) -> Interval<K> {
+    Interval::check_order(&lower, &upper);
+    Interval {
+        lower: Boundary::Open(lower),
+        upper: Boundary::Closed(upper), }
+  }
+}
+
+pub struct IntervalSet<K> where K: Ord {
+  intervals: BTreeSet<Interval<K>>
+}
+impl<K> IntervalSet<K> where K: Ord {
+  pub fn empty() -> IntervalSet<K> {
+    IntervalSet { intervals: BTreeSet::new() }
+  }
+  pub fn singleton(i: Interval<K>) -> IntervalSet<K> {
+    let mut s = BTreeSet::new();
+    s.insert(i);
+    IntervalSet { intervals: s }
+  }
+}
+
+impl<K> PointSet for K where K: Ord + Clone + Debug + Default {
+  type KSet = IntervalSet<K>;
+  fn empty() -> IntervalSet<K> {
+    IntervalSet::empty()
+  }
+  fn merge_sets(ints1: IntervalSet<K>, ints2: IntervalSet<K>)
+      -> IntervalSet<K> {
+    IntervalSet::empty()
+  }
+}
+
+
+pub struct ParBuf<K, V>
+    where K: Ord + PointSet {
+  map: BTreeMap<K, V>,
+  completed: K::KSet,
 }
 
