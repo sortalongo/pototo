@@ -9,9 +9,9 @@ pub trait Consumer<T: Merge> {
 }
 pub trait Producer<T> {
   type OutK: Copy;
-  fn get(&mut self) -> (Self::OutK, T);
+  fn get(&mut self) -> Option<(Self::OutK, T)>;
 }
-pub trait Processor<I: Merge, O> : Consumer<I> + Producer<Option<O>> {}
+pub trait Processor<I: Merge, O> : Consumer<I> + Producer<O> {}
 pub trait Buffer<T: Merge> : Processor<T, T> {}
 
 use std::mem;
@@ -52,13 +52,12 @@ impl<T: Merge> Consumer<T> for FusedBuffer<T> {
     self.done = true;
   }
 }
-impl<T> Producer<Option<T>> for FusedBuffer<T> {
+impl<T> Producer<T> for FusedBuffer<T> {
   type OutK = ();
-  fn get(&mut self) -> ((), Option<T>) {
-    let ret = if self.done {
-        mem::replace(&mut self.elem, None)
-    } else { None };
-    ((), ret)
+  fn get(&mut self) -> Option<((), T)> {
+    if self.done {
+        mem::replace(&mut self.elem, None).map(|elem| ((), elem))
+    } else { None }
   }
 }
 impl<T: Merge> Processor<T, T> for FusedBuffer<T> {}
@@ -72,13 +71,13 @@ impl Merge for i64 {
 #[test]
 fn fused_buffer_inserts() {
     let mut b = FusedBuffer::empty();
-    assert_eq!(((), None), b.get());
+    assert_eq!(None, b.get());
     let i = 5;
     b.put(i);
-    assert_eq!(((), None), b.get());
+    assert_eq!(None, b.get());
     b.advance(());
-    assert_eq!(((), Some(i)), b.get());
-    assert_eq!(((), None), b.get());
+    assert_eq!(Some(((), i)), b.get());
+    assert_eq!(None, b.get());
 }
 
  use std::marker::PhantomData;
@@ -109,11 +108,11 @@ impl<I: Merge, O: Merge, F, B> Consumer<I>
     self.buf.advance(ks);
   }
 }
-impl<I, O: Merge, F, B> Producer<Option<O>>
+impl<I, O: Merge, F, B> Producer<O>
     for PreFnProcessor<I, O, F, B>
     where F: Fn(B::InK, I) -> O, B: Buffer<O> {
   type OutK = B::OutK;
-  fn get(&mut self) -> (B::OutK, Option<O>) {
+  fn get(&mut self) -> Option<(B::OutK, O)> {
     self.buf.get()
   }
 }
@@ -124,33 +123,37 @@ impl<I: Merge, O: Merge, F, B> Processor<I, O>
 #[test]
 fn prefn_processor_works() {
     let mut fn_b = PreFnProcessor::new(|_k, i| i * 2, FusedBuffer::empty());
-    assert_eq!(((), None), fn_b.get());
+    assert_eq!(None, fn_b.get());
     let i = 5;
     fn_b.put((), i);
-    assert_eq!(((), None), fn_b.get());
+    assert_eq!(None, fn_b.get());
     fn_b.advance(());
-    assert_eq!(((), Some(i * 2)), fn_b.get());
-    assert_eq!(((), None), fn_b.get());
+    assert_eq!(Some(((), i * 2)), fn_b.get());
+    assert_eq!(None, fn_b.get());
 }
 
 use std::collections::VecDeque;
 
 pub struct LinearBuf<T> {
   deque: VecDeque<FusedBuffer<T>>,
-  current_min: usize,
+  buffer_min: usize,
+  complete_min: usize,
 }
 impl<T> LinearBuf<T> {
   pub fn new() -> LinearBuf<T> {
-    LinearBuf { deque: VecDeque::new(), current_min: 0 }
+    LinearBuf { deque: VecDeque::new(), buffer_min: 0, complete_min: 0 }
   }
 }
-impl<T: Merge> Consumer<T> for LinearBuf<T> {
+use std::fmt::Debug;
+impl<T: Merge + Debug> Consumer<T> for LinearBuf<T> {
   type InK = usize;
-  type KSet = (usize, usize); // Half-open, lower-inclusive interval.
+  type KSet = usize; // minimum unfinished index.
   fn put(&mut self, k: usize, t: T) {
-    let idx = k - self.current_min;
+    assert!(k >= self.buffer_min);
+    assert!(k >= self.complete_min);
+    let idx = k - self.buffer_min;
     let len = self.deque.len();
-    if self.deque.len() > idx {
+    if len > idx {
       if let Some(buf) = self.deque.get_mut(idx) {
         buf.put(t);
       } else {
@@ -164,15 +167,50 @@ impl<T: Merge> Consumer<T> for LinearBuf<T> {
       self.deque.push_back(FusedBuffer::new(t));
     }
   }
-  fn advance(&mut self, _ks: (usize, usize)) {}
-}
-impl<T> Producer<Option<T>> for LinearBuf<T> {
-  type OutK = ();
-  fn get(&mut self) -> ((), Option<T>) {
-    ((), None)
+  fn advance(&mut self, ks: usize) {
+    self.complete_min = ks;
   }
 }
-impl<T: Merge> Processor<T, T> for LinearBuf<T> {}
-impl<T: Merge> Buffer<T> for LinearBuf<T> {}
+impl<T> Producer<T> for LinearBuf<T> {
+  type OutK = usize;
+  fn get(&mut self) -> Option<(usize, T)> {
+    let pending = self.complete_min as i64 - self.buffer_min as i64;
+    assert!(pending >= 0);
+    if pending == 0 {
+        return None;
+    }
+    let to_skip = self.deque.iter().take(pending as usize).take_while(|fb| {
+        fb.elem.is_none()
+    }).count();
+    let buffer_min = self.buffer_min;
+    self.buffer_min += to_skip + 1;
+    self.deque.drain(0..(to_skip + 1)).last()
+        .and_then(|fb| fb.elem)
+        .map(|elem| (buffer_min + to_skip, elem))
+  }
+}
+impl<T: Merge + Debug> Processor<T, T> for LinearBuf<T> {}
+impl<T: Merge + Debug> Buffer<T> for LinearBuf<T> {}
 
+impl Merge for String {
+  fn merge(self, other: String) -> String {
+    self + &other
+  }
+}
+
+#[test]
+fn linear_buf_works() {
+  let mut buf = LinearBuf::<String>::new();
+  buf.put(1, "1".to_string());
+  buf.put(2, "2".to_string());
+  buf.put(0, "0".to_string());
+  assert_eq!(None, buf.get());
+  buf.advance(1);
+  assert_eq!(Some((0, "0".to_string())), buf.get());
+  assert_eq!(None, buf.get());
+  buf.advance(3);
+  assert_eq!(Some((1, "1".to_string())), buf.get());
+  assert_eq!(Some((2, "2".to_string())), buf.get());
+  assert_eq!(None, buf.get());
+}
 
