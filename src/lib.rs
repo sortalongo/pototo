@@ -239,10 +239,22 @@ use std::collections::BTreeSet;
 #[derive(Copy, Clone, Debug, Eq, Ord, PartialOrd, PartialEq)]
 pub enum Boundary<K> { Open(K), Closed(K) }
 impl<K> Boundary<K> {
-  pub fn value(&self) -> K where K: Clone {
+  pub fn value(&self) -> &K {
     match self {
-      &Boundary::Open(ref k) => k.clone(),
-      &Boundary::Closed(ref k) => k.clone(),
+      &Boundary::Open(ref k) => k,
+      &Boundary::Closed(ref k) => k,
+    }
+  }
+  pub fn is_open(&self) -> bool {
+    match self {
+      &Boundary::Open(ref _k) => true,
+      &Boundary::Closed(ref _k) => false,
+    }
+  }
+  pub fn inverted(self) -> Self {
+    match self {
+      Boundary::Open(k) => Boundary::Closed(k),
+      Boundary::Closed(k) => Boundary::Open(k),
     }
   }
 }
@@ -253,42 +265,89 @@ pub struct Interval<K: Ord> {
   upper: Boundary<K>
 }
 impl<K> Interval<K> where K: Ord + Clone + Debug {
-  fn check_order(lower: &K, upper: &K) {
-    if lower > upper {
-        panic!("Interval: {lower} must be <= {upper}.");
+  fn check_order(lower: &Boundary<K>, upper: &Boundary<K>) {
+    if lower.value() > upper.value() {
+      panic!("Interval: {lower} must be <= {upper}.");
+    } else if lower.value() == upper.value()
+        && lower.is_open() != upper.is_open() {
+      panic!("Interval: Constructing illegal half-open interval with equal endpoints {lower.value()}.");
     }
   }
 
-  pub fn open(lower: K, upper: K) -> Interval<K> {
+  pub fn empty() -> Interval<K> where K: Default {
+    Interval::open(Default::default(), Default::default())
+  }
+  pub fn singleton(k: K) -> Interval<K> {
+    Interval::closed(k.clone(), k)
+  }
+
+  pub fn of(lower: Boundary<K>, upper: Boundary<K>) -> Interval<K> {
     Interval::check_order(&lower, &upper);
-    Interval {
-        lower: Boundary::Open(lower),
-        upper: Boundary::Open(upper), }
+    Interval { lower: lower, upper: upper, }
+  }
+  pub fn inverted(lower: Boundary<K>, upper: Boundary<K>) -> Interval<K>  {
+    Interval::of(lower.inverted(), upper.inverted())
+  }
+
+  pub fn open(lower: K, upper: K) -> Interval<K> {
+    Interval::of(Boundary::Open(lower), Boundary::Open(upper))
   }
   pub fn closed(lower: K, upper: K) -> Interval<K> {
-    Interval::check_order(&lower, &upper);
-    Interval {
-        lower: Boundary::Closed(lower),
-        upper: Boundary::Closed(upper), }
+    Interval::of(Boundary::Closed(lower), Boundary::Closed(upper))
   }
   pub fn closed_open(lower: K, upper: K) -> Interval<K> {
-    Interval::check_order(&lower, &upper);
-    Interval {
-        lower: Boundary::Closed(lower),
-        upper: Boundary::Open(upper), }
+    Interval::of(Boundary::Closed(lower), Boundary::Open(upper))
   }
   pub fn open_closed(lower: K, upper: K) -> Interval<K> {
-    Interval::check_order(&lower, &upper);
-    Interval {
-        lower: Boundary::Open(lower),
-        upper: Boundary::Closed(upper), }
+    Interval::of(Boundary::Open(lower), Boundary::Closed(upper))
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.upper.value() == self.lower.value()
+        && self.upper.is_open() && self.lower.is_open()
+  }
+
+  pub fn overlaps_with(&self, other: &Interval<K>) -> bool {
+      if self.is_empty() || other.is_empty() {
+        return false;
+      }
+      let is_self_lower = self.lower.value() < other.lower.value();
+      let (smaller, larger) = if is_self_lower {
+        (self, other)
+      } else {
+        (other, self)
+      };
+      let is_range_overlap = smaller.upper.value() > larger.lower.value();
+      let is_point_overlap =
+          !Interval::inverted(smaller.upper.clone(), larger.lower.clone())
+            .is_empty();
+      is_range_overlap || is_point_overlap
+  }
+
+  pub fn merge_overlapping(self, other: Interval<K>) -> Interval<K> {
+      assert!(self.overlaps_with(&other));
+      let is_self_lower = self.lower.value() < other.lower.value()
+          || (self.lower.value() == other.lower.value()
+              && !self.lower.is_open());
+      let is_self_upper = self.upper.value() > other.upper.value()
+          || (self.upper.value() == other.upper.value()
+              && !self.upper.is_open());
+      match (is_self_lower, is_self_upper) {
+        (true, true) => self,
+        (true, false) => Interval::of(self.lower, other.upper),
+        (false, false) => other,
+        (false, true) => Interval::of(other.lower, self.upper),
+      }
   }
 }
 
-pub struct IntervalSet<K> where K: Ord {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntervalSet<K> where K: Clone + Ord {
+  // IntervalSet doesn't allow overlapping intervals, so we don't need an
+  // interval tree for efficiency.
   intervals: BTreeSet<Interval<K>>
 }
-impl<K> IntervalSet<K> where K: Ord {
+impl<K> IntervalSet<K> where K: Clone + Debug + Ord {
   pub fn empty() -> IntervalSet<K> {
     IntervalSet { intervals: BTreeSet::new() }
   }
@@ -296,6 +355,53 @@ impl<K> IntervalSet<K> where K: Ord {
     let mut s = BTreeSet::new();
     s.insert(i);
     IntervalSet { intervals: s }
+  }
+
+  // Inserts an interval, merging with any overlapping it.
+  pub fn insert(&mut self, int: Interval<K>) {
+    let lower_singleton = Interval::singleton(int.lower.value().clone());
+    fn filter_opt<T, F: FnOnce(&T) -> bool>(
+        opt: Option<T>, f: F) -> Option<T> {
+      opt.and_then(|t| if f(&t) { Some(t) } else { None })
+    }
+    let prev_opt =
+        filter_opt(self.intervals.range(..lower_singleton).next_back(),
+            |prev| int.overlaps_with(prev)).cloned();
+    let upper_singleton = Interval::singleton(int.upper.value().clone());
+    let next_opt =
+        filter_opt(self.intervals.range(upper_singleton..).next(),
+            |next| int.overlaps_with(next)).cloned();
+
+    for prev in prev_opt.iter() {
+      assert!(self.intervals.remove(prev));
+    }
+    for next in next_opt.iter() {
+      assert!(self.intervals.remove(next));
+    }
+    let prev_int_merged = match prev_opt {
+      Some(prev) => prev.merge_overlapping(int),
+      None => int,
+    };
+    let all_merged = match next_opt {
+        Some(next) => prev_int_merged.merge_overlapping(next),
+        None => prev_int_merged,
+    };
+    self.intervals.insert(all_merged);
+  }
+
+  // Returns the union of two IntervalSets. The returned IntervalSet:
+  // 1. Contains no overlapping intervals.
+  // 2. Contains only intervals overlapping with at least one interval in the inputs.
+  // 3. Contains no intervals containing regions not overlapping any intervals in the inputs.
+  pub fn union(self, other: IntervalSet<K>) -> IntervalSet<K>  {
+    let (smaller, mut larger) =
+        if self.intervals.len() > other.intervals.len() {
+          (other, self)
+        } else { (self, other) };
+    for int in smaller.intervals {
+      larger.insert(int);
+    }
+    larger
   }
 }
 
@@ -306,7 +412,7 @@ impl<K> PointSet for K where K: Ord + Clone + Debug + Default {
   }
   fn merge_sets(ints1: IntervalSet<K>, ints2: IntervalSet<K>)
       -> IntervalSet<K> {
-    IntervalSet::empty()
+    ints1.union(ints2)
   }
 }
 
