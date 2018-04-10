@@ -358,7 +358,7 @@ pub struct IntervalSet<K> where K: Clone + Ord {
   // interval tree for efficiency.
   intervals: BTreeSet<Interval<K>>
 }
-impl<K> IntervalSet<K> where K: Clone + Debug + Ord {
+impl<K> IntervalSet<K> where K: Clone + Debug + Hash + Ord {
   pub fn empty() -> IntervalSet<K> {
     IntervalSet { intervals: BTreeSet::new() }
   }
@@ -367,9 +367,13 @@ impl<K> IntervalSet<K> where K: Clone + Debug + Ord {
     s.insert(i);
     IntervalSet { intervals: s }
   }
+  pub fn of(mut intvls: Vec<Interval<K>>) -> IntervalSet<K> {
+    intvls.drain(..).fold(IntervalSet::empty(),
+        |mut iset, intvl| { iset.insert(intvl); iset })
+  }
 
   // Inserts an interval, merging with any overlapping it.
-  pub fn insert(&mut self, intvl: Interval<K>) where K: Hash {
+  pub fn insert(&mut self, intvl: Interval<K>) {
     let mut to_remove: HashSet<Interval<K>> = {
       let lower_singleton = Interval::singleton(intvl.lower.value().clone());
       let upper_singleton = Interval::singleton(intvl.upper.value().clone());
@@ -396,7 +400,7 @@ impl<K> IntervalSet<K> where K: Clone + Debug + Ord {
   // 1. Contains no overlapping intervals.
   // 2. Contains only intervals overlapping with at least one interval in the inputs.
   // 3. Contains no intervals containing regions not overlapping any intervals in the inputs.
-  pub fn union(self, other: IntervalSet<K>) -> IntervalSet<K> where K: Hash {
+  pub fn union(self, other: IntervalSet<K>) -> IntervalSet<K> {
     let (smaller, mut larger) =
         if self.intervals.len() > other.intervals.len() {
           (other, self)
@@ -429,6 +433,20 @@ fn interval_set_inserts() {
   let expected = IntervalSet::singleton(ordered_intvs.drain(..)
       .fold(intv1, |merged, next| merged.merge_overlapping(next)));
   assert_eq!(intvs, expected);
+}
+
+#[test]
+fn interval_set_unions() {
+  let iset1 = IntervalSet::of(vec![
+                              Interval::closed_open(0, 2),
+                              Interval::closed_open(5, 7),
+                              Interval::closed_open(-5, -1)]);
+  let iset2 = IntervalSet::of(vec![
+                              Interval::closed_open(2, 4),
+                              Interval::closed_open(2, 5),
+                              Interval::closed_open(-1, 0)]);
+  let union = iset1.union(iset2).intervals;
+  assert_eq!(union.len(), 1, "Set: {:?}", union);
 }
 
 impl<K> PointSet for K where K: Ord + Clone + Debug + Default + Hash {
