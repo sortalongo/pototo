@@ -233,10 +233,11 @@ fn linear_buf_works() {
   assert_eq!(None, buf.get());
 }
 
+use std::hash::Hash;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialOrd, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialOrd, PartialEq)]
 pub enum Boundary<K> { Open(K), Closed(K) }
 impl<K> Boundary<K> {
   pub fn value(&self) -> &K {
@@ -259,7 +260,7 @@ impl<K> Boundary<K> {
   }
 }
 
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialOrd, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialOrd, PartialEq)]
 pub struct Interval<K: Ord> {
   lower: Boundary<K>,
   upper: Boundary<K>
@@ -267,7 +268,7 @@ pub struct Interval<K: Ord> {
 impl<K> Interval<K> where K: Ord + Clone + Debug {
   fn check_order(lower: &Boundary<K>, upper: &Boundary<K>) {
     if lower.value() > upper.value() {
-      panic!("Interval: {lower} must be <= {upper}.");
+      panic!("Interval: {:?} must be <= {:?}.", lower, upper);
     } else if lower.value() == upper.value()
         && lower.is_open() != upper.is_open() {
       panic!("Interval: Constructing illegal half-open interval with equal endpoints {lower.value()}.");
@@ -284,9 +285,6 @@ impl<K> Interval<K> where K: Ord + Clone + Debug {
   pub fn of(lower: Boundary<K>, upper: Boundary<K>) -> Interval<K> {
     Interval::check_order(&lower, &upper);
     Interval { lower: lower, upper: upper, }
-  }
-  pub fn inverted(lower: Boundary<K>, upper: Boundary<K>) -> Interval<K>  {
-    Interval::of(lower.inverted(), upper.inverted())
   }
 
   pub fn open(lower: K, upper: K) -> Interval<K> {
@@ -318,14 +316,13 @@ impl<K> Interval<K> where K: Ord + Clone + Debug {
         (other, self)
       };
       let is_range_overlap = smaller.upper.value() > larger.lower.value();
-      let is_point_overlap =
-          !Interval::inverted(smaller.upper.clone(), larger.lower.clone())
-            .is_empty();
+      let is_point_overlap = smaller.upper.value() == larger.lower.value()
+          && (!smaller.upper.is_open() || !larger.lower.is_open());
       is_range_overlap || is_point_overlap
   }
 
   pub fn merge_overlapping(self, other: Interval<K>) -> Interval<K> {
-      assert!(self.overlaps_with(&other));
+      debug_assert!(self.overlaps_with(&other));
       let is_self_lower = self.lower.value() < other.lower.value()
           || (self.lower.value() == other.lower.value()
               && !self.lower.is_open());
@@ -340,6 +337,20 @@ impl<K> Interval<K> where K: Ord + Clone + Debug {
       }
   }
 }
+
+#[test]
+fn overlaps_with_works() {
+  assert!(Interval::closed(0, 2).overlaps_with(&Interval::closed(1, 4)));
+  assert!(Interval::closed(0, 2).overlaps_with(&Interval::closed(2, 4)));
+  assert!(!Interval::closed(0, 2).overlaps_with(&Interval::closed(4, 6)));
+  assert!(Interval::closed_open(0, 2).overlaps_with(&Interval::closed_open(2, 4)));
+  assert!(Interval::open_closed(0, 2).overlaps_with(&Interval::open_closed(2, 4)));
+  assert!(!Interval::open(0, 2).overlaps_with(&Interval::open(4, 6)));
+  assert!(!Interval::closed_open(0, 2).overlaps_with(&Interval::open_closed(2, 4)));
+  assert!(Interval::open_closed(0, 2).overlaps_with(&Interval::closed_open(2, 4)));
+}
+
+use std::collections::HashSet;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntervalSet<K> where K: Clone + Ord {
@@ -358,34 +369,26 @@ impl<K> IntervalSet<K> where K: Clone + Debug + Ord {
   }
 
   // Inserts an interval, merging with any overlapping it.
-  pub fn insert(&mut self, int: Interval<K>) {
-    let lower_singleton = Interval::singleton(int.lower.value().clone());
-    fn filter_opt<T, F: FnOnce(&T) -> bool>(
-        opt: Option<T>, f: F) -> Option<T> {
-      opt.and_then(|t| if f(&t) { Some(t) } else { None })
-    }
-    let prev_opt =
-        filter_opt(self.intervals.range(..lower_singleton).next_back(),
-            |prev| int.overlaps_with(prev)).cloned();
-    let upper_singleton = Interval::singleton(int.upper.value().clone());
-    let next_opt =
-        filter_opt(self.intervals.range(upper_singleton..).next(),
-            |next| int.overlaps_with(next)).cloned();
+  pub fn insert(&mut self, intvl: Interval<K>) where K: Hash {
+    let mut to_remove: HashSet<Interval<K>> = {
+      let lower_singleton = Interval::singleton(intvl.lower.value().clone());
+      let upper_singleton = Interval::singleton(intvl.upper.value().clone());
+      let prev_intvls =
+          self.intervals.range(..upper_singleton).rev().take_while(
+              |prev| intvl.overlaps_with(prev)).cloned();
+      let next_intvls =
+          self.intervals.range(lower_singleton..).take_while(
+              |next| intvl.overlaps_with(next)).cloned();
+      prev_intvls.chain(next_intvls).collect()
+    };
 
-    for prev in prev_opt.iter() {
-      assert!(self.intervals.remove(prev));
+    println!("Insert: to_remove={:?}", to_remove);
+    for overlapping_int in to_remove.iter() {
+      assert!(self.intervals.remove(overlapping_int));
     }
-    for next in next_opt.iter() {
-      assert!(self.intervals.remove(next));
-    }
-    let prev_int_merged = match prev_opt {
-      Some(prev) => prev.merge_overlapping(int),
-      None => int,
-    };
-    let all_merged = match next_opt {
-        Some(next) => prev_int_merged.merge_overlapping(next),
-        None => prev_int_merged,
-    };
+    let all_merged = to_remove.drain()
+        .fold(intvl, |merged_intvl, overlapping_intvl|
+            merged_intvl.merge_overlapping(overlapping_intvl));
     self.intervals.insert(all_merged);
   }
 
@@ -393,7 +396,7 @@ impl<K> IntervalSet<K> where K: Clone + Debug + Ord {
   // 1. Contains no overlapping intervals.
   // 2. Contains only intervals overlapping with at least one interval in the inputs.
   // 3. Contains no intervals containing regions not overlapping any intervals in the inputs.
-  pub fn union(self, other: IntervalSet<K>) -> IntervalSet<K>  {
+  pub fn union(self, other: IntervalSet<K>) -> IntervalSet<K> where K: Hash {
     let (smaller, mut larger) =
         if self.intervals.len() > other.intervals.len() {
           (other, self)
@@ -405,7 +408,30 @@ impl<K> IntervalSet<K> where K: Clone + Debug + Ord {
   }
 }
 
-impl<K> PointSet for K where K: Ord + Clone + Debug + Default {
+#[test]
+fn interval_set_inserts() {
+  let mut intvs = IntervalSet::empty();
+  let intv1 = Interval::closed_open(0, 2);
+  intvs.insert(intv1);
+  let intv2 = Interval::closed_open(5, 7);
+  intvs.insert(intv2);
+  assert_eq!(intvs.intervals.len(), 2, "Set: {:?}", intvs);
+
+  let intv3 = Interval::closed_open(2, 4);
+  intvs.insert(intv3);
+  assert_eq!(intvs.intervals.len(), 2, "Set: {:?}", intvs);
+
+  let intv4 = Interval::closed_open(2, 5);
+  intvs.insert(intv4);
+  assert_eq!(intvs.intervals.len(), 1, "Set: {:?}", intvs);
+
+  let mut ordered_intvs = vec![intv3, intv4, intv2];
+  let expected = IntervalSet::singleton(ordered_intvs.drain(..)
+      .fold(intv1, |merged, next| merged.merge_overlapping(next)));
+  assert_eq!(intvs, expected);
+}
+
+impl<K> PointSet for K where K: Ord + Clone + Debug + Default + Hash {
   type KSet = IntervalSet<K>;
   fn empty() -> IntervalSet<K> {
     IntervalSet::empty()
