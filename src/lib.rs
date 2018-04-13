@@ -1,37 +1,80 @@
+// Allows objects of the same type to be merged into a larger whole.
 pub trait Merge {
     fn merge(self, other: Self) -> Self;
 }
-pub trait Consumer<T: Merge> {
-    type InK: Copy;
-    type KSet;
-    fn put(&mut self, k: Self::InK, t: T);
-    fn advance(&mut self, ks: Self::KSet);
+
+// Allows code to compactly reason about sets of objects.
+// For example, an implementation of PointSet with `Point = f64` and `Set = IntervalSet<f64>` would
+// be sets of intervals of the real line.  Code using this interface can then work with infinite
+// sets of f64s without representing them explicitly.
+pub trait PointSet {
+    // The point type.
+    type Point;
+    // The type of sets of Points.
+    type Set;
+    // The empty set.
+    fn empty() -> Self::Set;
+    // Tests whether an element is a member of the set.
+    fn is_elem(p: &Self::Point, s: &Self::Set) -> bool;
+    // Takes the union of two sets.
+    fn union(s1: Self::Set, s2: Self::Set) -> Self::Set;
 }
+
+// Consumes messages, accumulating them until they are complete.
+pub trait Consumer<T> {
+    // The type of the points that are being consumed.
+    type InP: Copy;
+    type InPS: PointSet<Point = Self::InP>;
+    // Put a message `t` into point k.
+    fn put(&mut self, p: Self::InP, t: T);
+    // Mark a region of the space `ks` as ready to be produced.
+    fn advance(&mut self, s: <Self::InPS as PointSet>::Set);
+}
+
+// A bundle of produced points paired with the region to which these points correspond.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Bundle<PS: PointSet, T> {
+    pub punctuation: PS::Set,
+    pub points: Vec<(PS::Point, T)>,
+}
+impl<PS: PointSet, T> Bundle<PS, T> {
+    pub fn new(punc: PS::Set, points: Vec<(PS::Point, T)>) -> Bundle<PS, T> {
+        Bundle {
+            punctuation: punc,
+            points: points,
+        }
+    }
+}
+// Produces messages on demand, forgetting them when receiving acks for them.
 pub trait Producer<T> {
-    type OutK: Copy;
-    fn get(&mut self) -> Option<(Self::OutK, T)>;
+    // The type of points that are being produced.
+    type OutP: Copy;
+    type OutPS: PointSet;
+    // Produce a bundle of complete points. May be None even if some points are available. The
+    // implementation is responsible for deciding when to produce.
+    // ack_inline signals the implementation that it can immediately GC any points returned.
+    fn get(&mut self, ack_inline: bool) -> Option<Bundle<Self::OutPS, T>>;
+    // Acknowledge a region of points as received, allowing the producer to GC the region.
+    fn ack(&mut self, acks: <Self::OutPS as PointSet>::Set);
 }
-pub trait Processor<I: Merge, O>: Consumer<I> + Producer<O> {}
+pub trait Processor<I, O>: Consumer<I> + Producer<O> {}
 pub trait Buffer<T: Merge>: Processor<T, T> {}
 
-pub trait PointSet {
-    type KSet;
-    fn empty() -> Self::KSet;
-    fn merge_sets(k1: Self::KSet, k2: Self::KSet) -> Self::KSet;
-}
-
-use std::cmp::Ord;
 use std::fmt::Debug;
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialOrd, PartialEq)]
-struct LowerNat(usize);
 
-impl PointSet for LowerNat {
-    type KSet = LowerNat;
-    fn empty() -> LowerNat {
-        LowerNat(0)
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Unit();
+impl PointSet for Unit {
+    type Point = ();
+    type Set = bool;
+    fn empty() -> bool {
+        false
     }
-    fn merge_sets(n1: LowerNat, n2: LowerNat) -> LowerNat {
-        std::cmp::max(n1, n2)
+    fn is_elem(_u: &(), b: &bool) -> bool {
+        *b
+    }
+    fn union(b1: bool, b2: bool) -> bool {
+        b1 || b2
     }
 }
 
@@ -58,13 +101,6 @@ impl<T> FusedBuffer<T> {
     where
         T: Merge,
     {
-        Consumer::put(self, (), t);
-    }
-}
-impl<T: Merge> Consumer<T> for FusedBuffer<T> {
-    type InK = ();
-    type KSet = ();
-    fn put(&mut self, _k: (), t: T) {
         if self.done {
             panic!("Trying to put into a finished FusedBuffer.");
         }
@@ -77,22 +113,38 @@ impl<T: Merge> Consumer<T> for FusedBuffer<T> {
         };
         mem::replace(&mut self.elem, Some(tmp));
     }
-    fn advance(&mut self, _ks: ()) {
-        self.done = true;
+}
+impl<T: Merge> Consumer<T> for FusedBuffer<T> {
+    type InP = ();
+    type InPS = Unit;
+    fn put(&mut self, _k: (), t: T) {
+        self.put(t);
+    }
+    fn advance(&mut self, ks: bool) {
+        self.done = <Unit as PointSet>::union(self.done, ks);
     }
 }
-impl<T> Producer<T> for FusedBuffer<T> {
-    type OutK = ();
-    fn get(&mut self) -> Option<((), T)> {
-        if self.done {
-            mem::replace(&mut self.elem, None).map(|elem| ((), elem))
-        } else {
-            None
+impl<T: Clone> Producer<T> for FusedBuffer<T> {
+    type OutP = ();
+    type OutPS = Unit;
+    fn get(&mut self, ack_inline: bool) -> Option<Bundle<Unit, T>> {
+        fn mk_bundle<T>(t: T) -> Bundle<Unit, T> {
+            Bundle::new(true, vec![((), t)])
+        }
+        match (self.done, ack_inline) {
+            (true, true) => mem::replace(&mut self.elem, None).map(|elem| mk_bundle(elem)),
+            (true, false) => self.elem.as_ref().cloned().map(|elem| mk_bundle(elem)),
+            _ => None,
+        }
+    }
+    fn ack(&mut self, ack: bool) {
+        if ack {
+            mem::replace(&mut self.elem, None);
         }
     }
 }
-impl<T: Merge> Processor<T, T> for FusedBuffer<T> {}
-impl<T: Merge> Buffer<T> for FusedBuffer<T> {}
+impl<T: Clone + Merge> Processor<T, T> for FusedBuffer<T> {}
+impl<T: Clone + Merge> Buffer<T> for FusedBuffer<T> {}
 
 impl Merge for i64 {
     fn merge(self, other: i64) -> i64 {
@@ -100,15 +152,28 @@ impl Merge for i64 {
     }
 }
 #[test]
-fn fused_buffer_inserts() {
+fn fused_buffer_inserts_ack_inline() {
     let mut b = FusedBuffer::empty();
-    assert_eq!(None, b.get());
+    assert_eq!(None, b.get(true));
     let i = 5;
     b.put(i);
-    assert_eq!(None, b.get());
-    b.advance(());
-    assert_eq!(Some(((), i)), b.get());
-    assert_eq!(None, b.get());
+    assert_eq!(None, b.get(true));
+    b.advance(true);
+    assert_eq!(Some(Bundle::new(true, vec![((), i)])), b.get(true));
+    assert_eq!(None, b.get(true));
+}
+#[test]
+fn fused_buffer_inserts_ack_later() {
+    let mut b = FusedBuffer::empty();
+    assert_eq!(None, b.get(false));
+    let i = 5;
+    b.put(i);
+    assert_eq!(None, b.get(false));
+    b.advance(true);
+    assert_eq!(Some(Bundle::new(true, vec![((), i)])), b.get(false));
+    assert_eq!(Some(Bundle::new(true, vec![((), i)])), b.get(false));
+    b.ack(true);
+    assert_eq!(None, b.get(false));
 }
 
 use std::marker::PhantomData;
@@ -116,7 +181,7 @@ use std::marker::PhantomData;
 pub struct PreFnProcessor<I, O, F, B>
 where
     O: Merge,
-    F: Fn(B::InK, I) -> O,
+    F: Fn(B::InP, I) -> O,
     B: Buffer<O>,
 {
     f: F,
@@ -127,7 +192,7 @@ where
 }
 impl<I, O: Merge, F, B> PreFnProcessor<I, O, F, B>
 where
-    F: Fn(B::InK, I) -> O,
+    F: Fn(B::InP, I) -> O,
     B: Buffer<O>,
 {
     pub fn new(f: F, b: B) -> PreFnProcessor<I, O, F, B> {
@@ -139,80 +204,142 @@ where
         }
     }
 }
-impl<I: Merge, O: Merge, F, B> Consumer<I> for PreFnProcessor<I, O, F, B>
+impl<I, O: Merge, F, B> Consumer<I> for PreFnProcessor<I, O, F, B>
 where
-    F: Fn(B::InK, I) -> O,
+    F: Fn(B::InP, I) -> O,
     B: Buffer<O>,
 {
-    type InK = B::InK;
-    type KSet = B::KSet;
-    fn put(&mut self, k: B::InK, input: I) {
-        self.buf.put(k, (self.f)(k, input));
+    type InP = B::InP;
+    type InPS = B::InPS;
+    fn put(&mut self, p: Self::InP, input: I) {
+        self.buf.put(p, (self.f)(p, input));
     }
-    fn advance(&mut self, ks: B::KSet) {
-        self.buf.advance(ks);
+    fn advance(&mut self, s: <Self::InPS as PointSet>::Set) {
+        self.buf.advance(s);
     }
 }
 impl<I, O: Merge, F, B> Producer<O> for PreFnProcessor<I, O, F, B>
 where
-    F: Fn(B::InK, I) -> O,
+    F: Fn(B::InP, I) -> O,
     B: Buffer<O>,
 {
-    type OutK = B::OutK;
-    fn get(&mut self) -> Option<(B::OutK, O)> {
-        self.buf.get()
+    type OutP = B::OutP;
+    type OutPS = B::OutPS;
+    fn get(&mut self, ack_inline: bool) -> Option<Bundle<Self::OutPS, O>> {
+        self.buf.get(ack_inline)
+    }
+    fn ack(&mut self, acks: <Self::OutPS as PointSet>::Set) {
+        self.buf.ack(acks);
     }
 }
 impl<I: Merge, O: Merge, F, B> Processor<I, O> for PreFnProcessor<I, O, F, B>
 where
-    F: Fn(B::InK, I) -> O,
+    F: Fn(B::InP, I) -> O,
     B: Buffer<O>,
 {
 }
 
 #[test]
-fn prefn_processor_works() {
-    let mut fn_b = PreFnProcessor::new(|_k, i| i * 2, FusedBuffer::empty());
-    assert_eq!(None, fn_b.get());
+fn prefn_processor_works_ack_inline() {
+    let mut fn_b = PreFnProcessor::new(|_p, i| i * 2, FusedBuffer::empty());
+    assert_eq!(None, fn_b.get(true));
     let i = 5;
     fn_b.put((), i);
-    assert_eq!(None, fn_b.get());
-    fn_b.advance(());
-    assert_eq!(Some(((), i * 2)), fn_b.get());
-    assert_eq!(None, fn_b.get());
+    assert_eq!(None, fn_b.get(true));
+    fn_b.advance(true);
+    assert_eq!(Some(Bundle::new(true, vec![((), i * 2)])), fn_b.get(true));
+    assert_eq!(None, fn_b.get(true));
+}
+
+#[test]
+fn prefn_processor_works_ack_later() {
+    let mut fn_b = PreFnProcessor::new(|_p, i| i * 2, FusedBuffer::empty());
+    assert_eq!(None, fn_b.get(false));
+    let i = 5;
+    fn_b.put((), i);
+    assert_eq!(None, fn_b.get(false));
+    fn_b.advance(true);
+    assert_eq!(Some(Bundle::new(true, vec![((), i * 2)])), fn_b.get(false));
+    assert_eq!(Some(Bundle::new(true, vec![((), i * 2)])), fn_b.get(false));
+    fn_b.ack(true);
+    assert_eq!(None, fn_b.get(false));
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ZeroToN;
+
+impl PointSet for ZeroToN {
+    type Point = usize;
+    type Set = usize;
+    fn empty() -> usize {
+        0
+    }
+    fn is_elem(u: &usize, us: &usize) -> bool {
+        u < us
+    }
+    fn union(us1: usize, us2: usize) -> usize {
+        std::cmp::max(us1, us2)
+    }
 }
 
 use std::collections::VecDeque;
 
 pub struct LinearBuf<T> {
     deque: VecDeque<FusedBuffer<T>>,
+    // Which index of the buffer is represented by deque[0].
     buffer_min: usize,
-    complete_min: usize,
+    // Lowest index of the buffer that is incomplete.
+    incomplete_min: usize,
 }
 impl<T> LinearBuf<T> {
     pub fn new() -> LinearBuf<T> {
         LinearBuf {
             deque: VecDeque::new(),
             buffer_min: 0,
-            complete_min: 0,
+            incomplete_min: 0,
         }
+    }
+    fn summary(&self) -> String {
+        format!(
+            "LinearBuf {{ deque (len {}), buffer_min: {}, incomplete_min: {} }}",
+            self.deque.len(),
+            self.buffer_min,
+            self.incomplete_min
+        )
+    }
+    fn drain(&mut self, pending: usize) -> Vec<(usize, T)> {
+        assert!(
+            self.buffer_min + pending <= self.incomplete_min,
+            "Draining past completion boundary: {}.",
+            self.summary()
+        );
+        let old_buffer_min = self.buffer_min;
+        self.buffer_min += pending;
+        self.deque
+            .drain(0..pending)
+            .filter(|fb| fb.elem.is_some())
+            .enumerate()
+            .map(|(i, fb)| (old_buffer_min + i, fb.elem.unwrap()))
+            .collect()
     }
 }
 
 impl<T: Merge + Debug> Consumer<T> for LinearBuf<T> {
-    type InK = usize;
-    type KSet = usize; // minimum unfinished index.
+    type InP = usize;
+    type InPS = ZeroToN;
     fn put(&mut self, k: usize, t: T) {
         assert!(k >= self.buffer_min);
-        assert!(k >= self.complete_min);
+        assert!(k >= self.incomplete_min);
         let idx = k - self.buffer_min;
         let len = self.deque.len();
         if len > idx {
-            if let Some(buf) = self.deque.get_mut(idx) {
-                buf.put(t);
-            } else {
-                panic!("Failed getting index {idx} from {self.deque}");
-            }
+            assert!(
+                idx < self.deque.len(),
+                "Failed getting index {} from linear buf {}.",
+                idx,
+                self.summary()
+            );
+            self.deque.get_mut(idx).unwrap().put(t);
         } else {
             self.deque.reserve(idx - len + 1);
             for _j in len..idx {
@@ -222,33 +349,41 @@ impl<T: Merge + Debug> Consumer<T> for LinearBuf<T> {
         }
     }
     fn advance(&mut self, ks: usize) {
-        self.complete_min = ks;
+        self.incomplete_min = Self::InPS::union(self.incomplete_min, ks);
     }
 }
-impl<T> Producer<T> for LinearBuf<T> {
-    type OutK = usize;
-    fn get(&mut self) -> Option<(usize, T)> {
-        let pending = self.complete_min as i64 - self.buffer_min as i64;
+impl<T: Clone> Producer<T> for LinearBuf<T> {
+    type OutP = usize;
+    type OutPS = ZeroToN;
+    fn get(&mut self, ack_inline: bool) -> Option<Bundle<ZeroToN, T>> {
+        let pending = self.incomplete_min as i64 - self.buffer_min as i64;
         assert!(pending >= 0);
+        let pending = pending as usize;
         if pending == 0 {
             return None;
         }
-        let to_skip = self.deque
-            .iter()
-            .take(pending as usize)
-            .take_while(|fb| fb.elem.is_none())
-            .count();
-        let buffer_min = self.buffer_min;
-        self.buffer_min += to_skip + 1;
-        self.deque
-            .drain(0..(to_skip + 1))
-            .last()
-            .and_then(|fb| fb.elem)
-            .map(|elem| (buffer_min + to_skip, elem))
+        let points = if ack_inline {
+            self.drain(pending)
+        } else {
+            self.deque
+                .iter()
+                .take(pending)
+                .filter(|&fb| fb.elem.is_some())
+                .enumerate()
+                .map(|(i, fb)| (self.buffer_min + i, fb.elem.as_ref().cloned().unwrap()))
+                .collect()
+        };
+        Some(Bundle::new(self.incomplete_min, points))
+    }
+    fn ack(&mut self, acks: usize) {
+        let to_gc = acks as i64 - self.buffer_min as i64;
+        if to_gc > 0 {
+            self.drain(to_gc as usize);
+        }
     }
 }
-impl<T: Merge + Debug> Processor<T, T> for LinearBuf<T> {}
-impl<T: Merge + Debug> Buffer<T> for LinearBuf<T> {}
+impl<T: Merge + Clone + Debug> Processor<T, T> for LinearBuf<T> {}
+impl<T: Merge + Clone + Debug> Buffer<T> for LinearBuf<T> {}
 
 impl Merge for String {
     fn merge(self, other: String) -> String {
@@ -262,16 +397,25 @@ fn linear_buf_works() {
     buf.put(1, "1".to_string());
     buf.put(2, "2".to_string());
     buf.put(0, "0".to_string());
-    assert_eq!(None, buf.get());
+    assert_eq!(None, buf.get(true));
     buf.advance(1);
-    assert_eq!(Some((0, "0".to_string())), buf.get());
-    assert_eq!(None, buf.get());
+    assert_eq!(
+        Some(Bundle::new(1, vec![(0, "0".to_string())])),
+        buf.get(true)
+    );
+    assert_eq!(None, buf.get(true));
     buf.advance(3);
-    assert_eq!(Some((1, "1".to_string())), buf.get());
-    assert_eq!(Some((2, "2".to_string())), buf.get());
-    assert_eq!(None, buf.get());
+    assert_eq!(
+        Some(Bundle::new(
+            3,
+            vec![(1, "1".to_string()), (2, "2".to_string())]
+        )),
+        buf.get(true)
+    );
+    assert_eq!(None, buf.get(true));
 }
 
+use std::cmp::Ord;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -492,6 +636,15 @@ where
             })
     }
 
+    pub fn contains(&self, k: K) -> bool {
+        let k_intvl = Interval::singleton(k);
+        self.intervals
+            .range(.._Interval(k_intvl.clone()))
+            .next_back()
+            .map(|i| i.0.overlaps_with(&k_intvl))
+            .unwrap_or(false)
+    }
+
     pub fn copy_to_vec(&self) -> Vec<Interval<K>> {
         self.intervals.iter().map(|i| &i.0).cloned().collect()
     }
@@ -637,23 +790,34 @@ fn interval_set_unions_assorted() {
     );
 }
 
-impl<K> PointSet for K
+// The carrier type for intervals for any totally-orderd P.
+// Implements a PointSet with Interval<P> as the Point type and IntervalSet<P> as the Set type.
+pub struct Intervals<P: Ord> {
+    _k: PhantomData<P>,
+}
+
+impl<P> PointSet for Intervals<P>
 where
-    K: Ord + Clone + Debug + Default + Hash,
+    P: Ord + Clone + Debug + Default + Hash,
 {
-    type KSet = IntervalSet<K>;
-    fn empty() -> IntervalSet<K> {
+    type Point = P;
+    type Set = IntervalSet<P>;
+    fn empty() -> IntervalSet<P> {
         IntervalSet::empty()
     }
-    fn merge_sets(ints1: IntervalSet<K>, ints2: IntervalSet<K>) -> IntervalSet<K> {
+    fn is_elem(p: &P, intvl: &IntervalSet<P>) -> bool {
+        intvl.contains(p.clone())
+    }
+    fn union(ints1: IntervalSet<P>, ints2: IntervalSet<P>) -> IntervalSet<P> {
         ints1.union(ints2)
     }
 }
 
-pub struct ParBuf<K, V>
+pub struct ParBuf<P, V>
 where
-    K: Ord + PointSet,
+    P: Clone + Debug + Ord,
+    Intervals<P>: PointSet,
 {
-    map: BTreeMap<K, V>,
-    completed: K::KSet,
+    map: BTreeMap<P, V>,
+    completed: IntervalSet<P>,
 }
