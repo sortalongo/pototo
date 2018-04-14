@@ -1,6 +1,7 @@
 // Allows objects of the same type to be merged into a larger whole.
 pub trait Merge {
     fn merge(self, other: Self) -> Self;
+    fn merge_in_place(&mut self, other: Self);
 }
 
 // Allows code to compactly reason about sets of objects.
@@ -149,6 +150,9 @@ impl<T: Clone + Merge> Buffer<T> for FusedBuffer<T> {}
 impl Merge for i64 {
     fn merge(self, other: i64) -> i64 {
         self + other
+    }
+    fn merge_in_place(&mut self, other: i64) {
+        *self += other;
     }
 }
 #[test]
@@ -388,6 +392,9 @@ impl<T: Merge + Clone + Debug> Buffer<T> for LinearBuf<T> {}
 impl Merge for String {
     fn merge(self, other: String) -> String {
         self + &other
+    }
+    fn merge_in_place(&mut self, other: String) {
+        *self += &other;
     }
 }
 
@@ -805,8 +812,8 @@ where
     fn empty() -> IntervalSet<P> {
         IntervalSet::empty()
     }
-    fn is_elem(p: &P, intvl: &IntervalSet<P>) -> bool {
-        intvl.contains(p.clone())
+    fn is_elem(p: &P, intvl_set: &IntervalSet<P>) -> bool {
+        intvl_set.contains(p.clone())
     }
     fn union(ints1: IntervalSet<P>, ints2: IntervalSet<P>) -> IntervalSet<P> {
         ints1.union(ints2)
@@ -818,6 +825,28 @@ where
     P: Clone + Debug + Ord,
     Intervals<P>: PointSet,
 {
-    map: BTreeMap<P, V>,
+    points: BTreeMap<P, V>,
     completed: IntervalSet<P>,
+}
+
+impl<P, V> Consumer<V> for ParBuf<P, V>
+where
+    P: Copy + Ord + Clone + Debug + Default + Hash,
+    V: Merge,
+{
+    type InP = P;
+    type InPS = Intervals<P>;
+
+    fn put(&mut self, p: P, v: V) {
+        let v_prev_opt = self.points.insert(p, v);
+        match v_prev_opt {
+            Some(v_prev) => self.points.get_mut(&p).unwrap().merge_in_place(v_prev),
+            _ => (),
+        }
+    }
+
+    fn advance(&mut self, s: IntervalSet<P>) {
+        let moved = mem::replace(&mut self.completed, Intervals::empty());
+        self.completed = Intervals::union(moved, s);
+    }
 }
