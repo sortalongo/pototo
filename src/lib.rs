@@ -426,6 +426,7 @@ use std::cmp::Ord;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::Bound;
 use std::hash::Hash;
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -450,6 +451,12 @@ impl<K> Boundary<K> {
         match self {
             Boundary::Open(k) => Boundary::Closed(k),
             Boundary::Closed(k) => Boundary::Open(k),
+        }
+    }
+    pub fn to_bound(&self) -> Bound<&K> {
+        match self {
+            &Boundary::Open(ref k) => Bound::Excluded(k),
+            &Boundary::Closed(ref k) => Bound::Included(k),
         }
     }
 }
@@ -522,6 +529,10 @@ where
 
     pub fn is_empty(&self) -> bool {
         self.upper.value() == self.lower.value() && self.upper.is_open() && self.lower.is_open()
+    }
+
+    pub fn to_range(&self) -> (Bound<&K>, Bound<&K>) {
+        (self.lower.to_bound(), self.upper.to_bound())
     }
 
     pub fn overlaps_with(&self, other: &Interval<K>) -> bool {
@@ -643,13 +654,25 @@ where
             })
     }
 
-    pub fn contains(&self, k: K) -> bool {
+    pub fn len(&self) -> usize {
+        self.intervals.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Interval<K>> {
+        self.intervals.iter().map(|i| &i.0)
+    }
+
+    pub fn contains_point(&self, k: K) -> bool {
         let k_intvl = Interval::singleton(k);
         self.intervals
             .range(.._Interval(k_intvl.clone()))
             .next_back()
             .map(|i| i.0.overlaps_with(&k_intvl))
             .unwrap_or(false)
+    }
+
+    pub fn contains_interval(&self, interval: Interval<K>) -> bool {
+        self.intervals.contains(&_Interval(interval))
     }
 
     pub fn copy_to_vec(&self) -> Vec<Interval<K>> {
@@ -813,7 +836,7 @@ where
         IntervalSet::empty()
     }
     fn is_elem(p: &P, intvl_set: &IntervalSet<P>) -> bool {
-        intvl_set.contains(p.clone())
+        intvl_set.contains_point(p.clone())
     }
     fn union(ints1: IntervalSet<P>, ints2: IntervalSet<P>) -> IntervalSet<P> {
         ints1.union(ints2)
@@ -827,6 +850,7 @@ where
 {
     points: BTreeMap<P, V>,
     completed: IntervalSet<P>,
+    acked: IntervalSet<P>,
 }
 
 impl<P, V> Consumer<V> for ParBuf<P, V>
@@ -838,6 +862,8 @@ where
     type InPS = Intervals<P>;
 
     fn put(&mut self, p: P, v: V) {
+        assert!(!self.completed.contains_point(p));
+        assert!(!self.acked.contains_point(p));
         let v_prev_opt = self.points.insert(p, v);
         match v_prev_opt {
             Some(v_prev) => self.points.get_mut(&p).unwrap().merge_in_place(v_prev),
@@ -849,4 +875,65 @@ where
         let moved = mem::replace(&mut self.completed, Intervals::empty());
         self.completed = Intervals::union(moved, s);
     }
+}
+
+impl<P, V> Producer<V> for ParBuf<P, V>
+where
+    P: Copy + Ord + Clone + Debug + Default + Hash,
+    V: Clone + Merge,
+{
+    type OutP = P;
+    type OutPS = Intervals<P>;
+
+    fn get(&mut self, ack_inline: bool) -> Option<Bundle<Self::OutPS, V>> {
+        if self.completed.len() == 0 {
+            return None;
+        }
+        let intervals = mem::replace(&mut self.completed, Intervals::empty());
+        let pts = intervals
+            .iter()
+            .cloned()
+            .flat_map(|interval| {
+                let complete_points: Vec<(P, V)> = self.points
+                    .range(interval.to_range())
+                    .map(|(p, v)| (*p, v.clone()))
+                    .collect();
+                if ack_inline {
+                    self.acked.insert(interval);
+                }
+                for &(ref pt, _) in complete_points.iter() {
+                    if ack_inline {
+                        self.points.remove(pt);
+                    }
+                }
+                complete_points
+            })
+            .collect();
+        Some(Bundle::new(intervals, pts))
+    }
+
+    fn ack(&mut self, acks: <Self::OutPS as PointSet>::Set) {
+        for ack in acks.iter() {
+            assert!(self.completed.contains_interval(ack.clone()));
+            let acked_points: Vec<P> = self.points.range(ack.to_range()).map(|(p, _)| *p).collect();
+            for pt in acked_points {
+                self.points.remove(&pt);
+            }
+            self.acked.insert(ack.clone());
+        }
+    }
+}
+
+impl<P, V> Processor<V, V> for ParBuf<P, V>
+where
+    P: Copy + Ord + Clone + Debug + Default + Hash,
+    V: Merge + Clone + Debug,
+{
+}
+
+impl<P, V> Buffer<V> for ParBuf<P, V>
+where
+    P: Copy + Ord + Clone + Debug + Default + Hash,
+    V: Merge + Clone + Debug,
+{
 }
