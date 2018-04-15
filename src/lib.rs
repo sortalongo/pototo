@@ -709,6 +709,10 @@ where
         self.intervals.insert(_Interval(all_merged));
     }
 
+    pub fn remove(&mut self, interval: &Interval<K>) -> bool {
+        self.intervals.remove(&_Interval(interval.clone()))
+    }
+
     // Returns the union of two IntervalSets. The returned IntervalSet:
     // 1. Contains no overlapping intervals.
     // 2. Contains only intervals overlapping with at least one interval in the inputs.
@@ -822,6 +826,7 @@ fn interval_set_unions_assorted() {
 
 // The carrier type for intervals for any totally-orderd P.
 // Implements a PointSet with Interval<P> as the Point type and IntervalSet<P> as the Set type.
+#[derive(Debug, Eq, PartialEq)]
 pub struct Intervals<P: Ord> {
     _k: PhantomData<P>,
 }
@@ -845,7 +850,7 @@ where
 
 pub struct ParBuf<P, V>
 where
-    P: Clone + Debug + Ord,
+    P: Clone + Debug + Hash + Ord,
     Intervals<P>: PointSet,
 {
     points: BTreeMap<P, V>,
@@ -853,10 +858,24 @@ where
     acked: IntervalSet<P>,
 }
 
+impl<P, V> ParBuf<P, V>
+where
+    P: Clone + Debug + Hash + Ord,
+    Intervals<P>: PointSet,
+{
+    pub fn empty() -> ParBuf<P, V> {
+        ParBuf {
+            points: BTreeMap::new(),
+            completed: IntervalSet::empty(),
+            acked: IntervalSet::empty(),
+        }
+    }
+}
+
 impl<P, V> Consumer<V> for ParBuf<P, V>
 where
-    P: Copy + Ord + Clone + Debug + Default + Hash,
-    V: Merge,
+    P: Copy + Clone + Debug + Default + Hash + Ord,
+    V: Debug + Merge,
 {
     type InP = P;
     type InPS = Intervals<P>;
@@ -864,7 +883,9 @@ where
     fn put(&mut self, p: P, v: V) {
         assert!(!self.completed.contains_point(p));
         assert!(!self.acked.contains_point(p));
+        println!("putting: {:?}", &v);
         let v_prev_opt = self.points.insert(p, v);
+        println!("put, prev: {:?}", &v_prev_opt);
         match v_prev_opt {
             Some(v_prev) => self.points.get_mut(&p).unwrap().merge_in_place(v_prev),
             _ => (),
@@ -879,7 +900,7 @@ where
 
 impl<P, V> Producer<V> for ParBuf<P, V>
 where
-    P: Copy + Ord + Clone + Debug + Default + Hash,
+    P: Copy + Clone + Debug + Default + Hash + Ord,
     V: Clone + Merge,
 {
     type OutP = P;
@@ -889,7 +910,11 @@ where
         if self.completed.len() == 0 {
             return None;
         }
-        let intervals = mem::replace(&mut self.completed, Intervals::empty());
+        let intervals = if ack_inline {
+            mem::replace(&mut self.completed, Intervals::empty())
+        } else {
+            self.completed.clone()
+        };
         let pts = intervals
             .iter()
             .cloned()
@@ -915,9 +940,10 @@ where
     fn ack(&mut self, acks: <Self::OutPS as PointSet>::Set) {
         for ack in acks.iter() {
             assert!(self.completed.contains_interval(ack.clone()));
+            assert!(self.completed.remove(&ack));
             let acked_points: Vec<P> = self.points.range(ack.to_range()).map(|(p, _)| *p).collect();
             for pt in acked_points {
-                self.points.remove(&pt);
+                assert!(self.points.remove(&pt).is_some());
             }
             self.acked.insert(ack.clone());
         }
@@ -926,14 +952,69 @@ where
 
 impl<P, V> Processor<V, V> for ParBuf<P, V>
 where
-    P: Copy + Ord + Clone + Debug + Default + Hash,
+    P: Copy + Clone + Debug + Default + Hash + Ord,
     V: Merge + Clone + Debug,
 {
 }
 
 impl<P, V> Buffer<V> for ParBuf<P, V>
 where
-    P: Copy + Ord + Clone + Debug + Default + Hash,
+    P: Copy + Clone + Debug + Default + Hash + Ord,
     V: Merge + Clone + Debug,
 {
+}
+
+fn make_par_buf<P, V>(pairs: Vec<(P, V)>) -> ParBuf<P, V>
+where
+    P: Copy + Clone + Debug + Default + Hash + Ord,
+    V: Debug + Merge,
+{
+    let mut buf = ParBuf::empty();
+    for pair in pairs {
+        buf.put(pair.0, pair.1);
+    }
+    buf
+}
+#[test]
+fn par_buf_puts() {
+    let buf = make_par_buf(vec![("a", 1), ("a", 2), ("b", 3)]);
+    assert_eq!(buf.points.len(), 2);
+}
+
+#[test]
+fn par_buf_advances() {
+    let mut buf = make_par_buf(vec![("a", 1), ("a", 2), ("b", 3)]);
+    let intervals = IntervalSet::singleton(Interval::closed_open("a", "b"));
+    buf.advance(intervals.clone());
+    assert_eq!(
+        buf.get(true),
+        Some(Bundle::new(intervals.clone(), vec![("a", 3)]))
+    );
+    assert_eq!(buf.get(true), None);
+
+    let intervals = IntervalSet::singleton(Interval::closed_open("b", "c"));
+    buf.advance(intervals.clone());
+    assert_eq!(
+        buf.get(true),
+        Some(Bundle::new(intervals.clone(), vec![("b", 3)]))
+    );
+    assert_eq!(buf.get(true), None);
+
+    assert_eq!(buf.completed.len(), 0);
+    assert_eq!(buf.acked.len(), 1);
+}
+
+#[test]
+fn par_buf_acks() {
+    let mut buf = make_par_buf(vec![("a", 1), ("a", 2), ("b", 3)]);
+    let intervals = IntervalSet::singleton(Interval::closed("a", "b"));
+    buf.advance(intervals.clone());
+    assert_eq!(
+        buf.get(false),
+        Some(Bundle::new(intervals.clone(), vec![("a", 3), ("b", 3)]))
+    );
+
+    buf.ack(intervals.clone());
+    assert_eq!(buf.completed.len(), 0);
+    assert_eq!(buf.acked.len(), 1);
 }
