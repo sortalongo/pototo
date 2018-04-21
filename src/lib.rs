@@ -10,7 +10,7 @@ pub trait Merge {
 // sets of f64s without representing them explicitly.
 pub trait PointSet {
     // The point type.
-    type Point;
+    type Point: Copy;
     // The type of sets of Points.
     type Set;
     // The empty set.
@@ -50,7 +50,7 @@ impl<PS: PointSet, T> Bundle<PS, T> {
 pub trait Producer<T> {
     // The type of points that are being produced.
     type OutP: Copy;
-    type OutPS: PointSet;
+    type OutPS: PointSet<Point = Self::OutP>;
     // Produce a bundle of complete points. May be None even if some points are available. The
     // implementation is responsible for deciding when to produce.
     // ack_inline signals the implementation that it can immediately GC any points returned.
@@ -833,7 +833,7 @@ pub struct Intervals<P: Ord> {
 
 impl<P> PointSet for Intervals<P>
 where
-    P: Ord + Clone + Debug + Default + Hash,
+    P: Ord + Clone + Copy + Debug + Default + Hash,
 {
     type Point = P;
     type Set = IntervalSet<P>;
@@ -1018,3 +1018,115 @@ fn par_buf_acks() {
     assert_eq!(buf.completed.len(), 0);
     assert_eq!(buf.acked.len(), 1);
 }
+
+struct Transform<I, O, InB, OutB, Map, Image>
+where
+    I: Merge,
+    O: Merge,
+    InB: Buffer<I>,
+    OutB: Buffer<O>,
+    Map: Fn(<InB as Producer<I>>::OutP, I) -> (<OutB as Consumer<O>>::InP, O),
+    Image: Fn(<<InB as Producer<I>>::OutPS as PointSet>::Set)
+        -> <<OutB as Consumer<O>>::InPS as PointSet>::Set,
+{
+    in_buf: InB,
+    out_buf: OutB,
+    map: Map,
+    image: Image,
+    _i: PhantomData<I>,
+    _o: PhantomData<O>,
+}
+
+impl<I, O, InB, OutB, Map, Image> Producer<O> for Transform<I, O, InB, OutB, Map, Image>
+where
+    I: Merge,
+    O: Merge,
+    InB: Buffer<I>,
+    OutB: Buffer<O>,
+    Map: Fn(<InB as Producer<I>>::OutP, I) -> (<OutB as Consumer<O>>::InP, O),
+    Image: Fn(<<InB as Producer<I>>::OutPS as PointSet>::Set)
+        -> <<OutB as Consumer<O>>::InPS as PointSet>::Set,
+{
+    type OutP = <<OutB as Producer<O>>::OutPS as PointSet>::Point;
+    type OutPS = <OutB as Producer<O>>::OutPS;
+    fn get(&mut self, ack_inline: bool) -> Option<Bundle<Self::OutPS, O>> {
+        (&mut self.out_buf).get(ack_inline)
+    }
+    fn ack(&mut self, acks: <Self::OutPS as PointSet>::Set) {
+        (&mut self.out_buf).ack(acks);
+    }
+}
+
+impl<I, O, InB, OutB, Map, Image> Consumer<I> for Transform<I, O, InB, OutB, Map, Image>
+where
+    I: Merge,
+    O: Merge,
+    InB: Buffer<I>,
+    OutB: Buffer<O>,
+    Map: Fn(<InB as Producer<I>>::OutP, I) -> (<OutB as Consumer<O>>::InP, O),
+    Image: Fn(<<InB as Producer<I>>::OutPS as PointSet>::Set)
+        -> <<OutB as Consumer<O>>::InPS as PointSet>::Set,
+{
+    type InP = <<InB as Consumer<I>>::InPS as PointSet>::Point;
+    type InPS = <InB as Consumer<I>>::InPS;
+
+    fn put(&mut self, p: Self::InP, i: I) {
+        (&mut self.in_buf).put(p, i);
+    }
+
+    fn advance(&mut self, s: <Self::InPS as PointSet>::Set) {
+        let in_buf = &mut self.in_buf;
+        let image = &self.image;
+        let map = &self.map;
+        (in_buf).advance(s);
+        in_buf.get(true).map(|mut bundle| {
+            let image = image(bundle.punctuation);
+            let points = bundle
+                .points
+                .drain(..)
+                .map(|(pt, val)| map(pt, val))
+                .collect();
+            Bundle::<<OutB as Consumer<O>>::InPS, O>::new(image, points)
+        });
+    }
+}
+
+impl<I, O, InB, OutB, Map, Image> Processor<I, O> for Transform<I, O, InB, OutB, Map, Image>
+where
+    I: Merge,
+    O: Merge,
+    InB: Buffer<I>,
+    OutB: Buffer<O>,
+    Map: Fn(<InB as Producer<I>>::OutP, I) -> (<OutB as Consumer<O>>::InP, O),
+    Image: Fn(<<InB as Producer<I>>::OutPS as PointSet>::Set)
+        -> <<OutB as Consumer<O>>::InPS as PointSet>::Set,
+{
+}
+
+pub fn transform<I, O, InB, OutB, Map, Image>(
+    in_buf: InB,
+    out_buf: OutB,
+    map: Map,
+    image: Image,
+) -> impl Processor<I, O>
+where
+    I: Merge,
+    O: Merge,
+    InB: Buffer<I>,
+    OutB: Buffer<O>,
+    Map: Fn(<InB as Producer<I>>::OutP, I) -> (<OutB as Consumer<O>>::InP, O),
+    Image: Fn(<<InB as Producer<I>>::OutPS as PointSet>::Set)
+        -> <<OutB as Consumer<O>>::InPS as PointSet>::Set,
+{
+    Transform {
+        in_buf: in_buf,
+        out_buf: out_buf,
+        map: map,
+        image: image,
+        _i: PhantomData,
+        _o: PhantomData,
+    }
+}
+
+#[test]
+fn transform_puts() {}
