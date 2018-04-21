@@ -10,7 +10,7 @@ pub trait Merge {
 // sets of f64s without representing them explicitly.
 pub trait PointSet {
     // The point type.
-    type Point: Copy;
+    type Point;
     // The type of sets of Points.
     type Set;
     // The empty set.
@@ -24,7 +24,7 @@ pub trait PointSet {
 // Consumes messages, accumulating them until they are complete.
 pub trait Consumer<T> {
     // The type of the points that are being consumed.
-    type InP: Copy;
+    type InP: Clone;
     type InPS: PointSet<Point = Self::InP>;
     // Put a message `t` into point k.
     fn put(&mut self, p: Self::InP, t: T);
@@ -49,7 +49,7 @@ impl<PS: PointSet, T> Bundle<PS, T> {
 // Produces messages on demand, forgetting them when receiving acks for them.
 pub trait Producer<T> {
     // The type of points that are being produced.
-    type OutP: Copy;
+    type OutP: Clone;
     type OutPS: PointSet<Point = Self::OutP>;
     // Produce a bundle of complete points. May be None even if some points are available. The
     // implementation is responsible for deciding when to produce.
@@ -59,7 +59,12 @@ pub trait Producer<T> {
     fn ack(&mut self, acks: <Self::OutPS as PointSet>::Set);
 }
 pub trait Processor<I, O>: Consumer<I> + Producer<O> {}
-pub trait Buffer<T: Merge>: Processor<T, T> {}
+pub trait Buffer<T: Merge>: Processor<T, T>
+where
+    Self: Producer<T, OutP = <Self as Consumer<T>>::InP>,
+    Self: Producer<T, OutPS = <Self as Consumer<T>>::InPS>,
+{
+}
 
 use std::fmt::Debug;
 
@@ -216,7 +221,7 @@ where
     type InP = B::InP;
     type InPS = B::InPS;
     fn put(&mut self, p: Self::InP, input: I) {
-        self.buf.put(p, (self.f)(p, input));
+        self.buf.put(p.clone(), (self.f)(p, input));
     }
     fn advance(&mut self, s: <Self::InPS as PointSet>::Set) {
         self.buf.advance(s);
@@ -833,7 +838,7 @@ pub struct Intervals<P: Ord> {
 
 impl<P> PointSet for Intervals<P>
 where
-    P: Ord + Clone + Copy + Debug + Default + Hash,
+    P: Ord + Clone + Debug + Hash,
 {
     type Point = P;
     type Set = IntervalSet<P>;
@@ -874,17 +879,17 @@ where
 
 impl<P, V> Consumer<V> for ParBuf<P, V>
 where
-    P: Copy + Clone + Debug + Default + Hash + Ord,
+    P: Clone + Debug + Hash + Ord,
     V: Debug + Merge,
 {
     type InP = P;
     type InPS = Intervals<P>;
 
     fn put(&mut self, p: P, v: V) {
-        assert!(!self.completed.contains_point(p));
-        assert!(!self.acked.contains_point(p));
+        assert!(!self.completed.contains_point(p.clone()));
+        assert!(!self.acked.contains_point(p.clone()));
         println!("putting: {:?}", &v);
-        let v_prev_opt = self.points.insert(p, v);
+        let v_prev_opt = self.points.insert(p.clone(), v);
         println!("put, prev: {:?}", &v_prev_opt);
         match v_prev_opt {
             Some(v_prev) => self.points.get_mut(&p).unwrap().merge_in_place(v_prev),
@@ -900,7 +905,7 @@ where
 
 impl<P, V> Producer<V> for ParBuf<P, V>
 where
-    P: Copy + Clone + Debug + Default + Hash + Ord,
+    P: Clone + Debug + Hash + Ord,
     V: Clone + Merge,
 {
     type OutP = P;
@@ -921,7 +926,7 @@ where
             .flat_map(|interval| {
                 let complete_points: Vec<(P, V)> = self.points
                     .range(interval.to_range())
-                    .map(|(p, v)| (*p, v.clone()))
+                    .map(|(p, v)| (p.clone(), v.clone()))
                     .collect();
                 if ack_inline {
                     self.acked.insert(interval);
@@ -941,7 +946,10 @@ where
         for ack in acks.iter() {
             assert!(self.completed.contains_interval(ack.clone()));
             assert!(self.completed.remove(&ack));
-            let acked_points: Vec<P> = self.points.range(ack.to_range()).map(|(p, _)| *p).collect();
+            let acked_points: Vec<P> = self.points
+                .range(ack.to_range())
+                .map(|(p, _)| p.clone())
+                .collect();
             for pt in acked_points {
                 assert!(self.points.remove(&pt).is_some());
             }
@@ -952,21 +960,21 @@ where
 
 impl<P, V> Processor<V, V> for ParBuf<P, V>
 where
-    P: Copy + Clone + Debug + Default + Hash + Ord,
+    P: Clone + Debug + Hash + Ord,
     V: Merge + Clone + Debug,
 {
 }
 
 impl<P, V> Buffer<V> for ParBuf<P, V>
 where
-    P: Copy + Clone + Debug + Default + Hash + Ord,
+    P: Clone + Debug + Hash + Ord,
     V: Merge + Clone + Debug,
 {
 }
 
 fn make_par_buf<P, V>(pairs: Vec<(P, V)>) -> ParBuf<P, V>
 where
-    P: Copy + Clone + Debug + Default + Hash + Ord,
+    P: Clone + Debug + Hash + Ord,
     V: Debug + Merge,
 {
     let mut buf = ParBuf::empty();
@@ -1019,7 +1027,7 @@ fn par_buf_acks() {
     assert_eq!(buf.acked.len(), 1);
 }
 
-struct Transform<I, O, InB, OutB, Map, Image>
+pub struct Transform<I, O, InB, OutB, Map, Image>
 where
     I: Merge,
     O: Merge,
@@ -1047,7 +1055,7 @@ where
     Image: Fn(<<InB as Producer<I>>::OutPS as PointSet>::Set)
         -> <<OutB as Consumer<O>>::InPS as PointSet>::Set,
 {
-    type OutP = <<OutB as Producer<O>>::OutPS as PointSet>::Point;
+    type OutP = <OutB as Producer<O>>::OutP;
     type OutPS = <OutB as Producer<O>>::OutPS;
     fn get(&mut self, ack_inline: bool) -> Option<Bundle<Self::OutPS, O>> {
         (&mut self.out_buf).get(ack_inline)
@@ -1067,7 +1075,7 @@ where
     Image: Fn(<<InB as Producer<I>>::OutPS as PointSet>::Set)
         -> <<OutB as Consumer<O>>::InPS as PointSet>::Set,
 {
-    type InP = <<InB as Consumer<I>>::InPS as PointSet>::Point;
+    type InP = <InB as Consumer<I>>::InP;
     type InPS = <InB as Consumer<I>>::InPS;
 
     fn put(&mut self, p: Self::InP, i: I) {
@@ -1076,18 +1084,20 @@ where
 
     fn advance(&mut self, s: <Self::InPS as PointSet>::Set) {
         let in_buf = &mut self.in_buf;
+        let out_buf = &mut self.out_buf;
         let image = &self.image;
         let map = &self.map;
-        (in_buf).advance(s);
-        in_buf.get(true).map(|mut bundle| {
-            let image = image(bundle.punctuation);
-            let points = bundle
-                .points
-                .drain(..)
-                .map(|(pt, val)| map(pt, val))
-                .collect();
-            Bundle::<<OutB as Consumer<O>>::InPS, O>::new(image, points)
-        });
+        in_buf.advance(s);
+        match in_buf.get(true) {
+            Some(mut bundle) => {
+                for (pt, val) in bundle.points.drain(..) {
+                    let (new_pt, new_val) = map(pt, val);
+                    out_buf.put(new_pt, new_val);
+                }
+                out_buf.advance(image(bundle.punctuation));
+            }
+            None => (),
+        }
     }
 }
 
@@ -1108,7 +1118,7 @@ pub fn transform<I, O, InB, OutB, Map, Image>(
     out_buf: OutB,
     map: Map,
     image: Image,
-) -> impl Processor<I, O>
+) -> Transform<I, O, InB, OutB, Map, Image>
 where
     I: Merge,
     O: Merge,
@@ -1128,5 +1138,58 @@ where
     }
 }
 
+use std::time::Duration;
+use std::time::Instant;
+
+impl<'l> Merge for &'l str {
+    fn merge(self, _: &'l str) -> &'l str {
+        unreachable!()
+    }
+    fn merge_in_place(&mut self, _: &'l str) {
+        unreachable!()
+    }
+}
+impl<T: Clone + Eq + Hash> Merge for HashSet<T> {
+    fn merge(self, other: HashSet<T>) -> HashSet<T> {
+        self.union(&other).cloned().collect()
+    }
+    fn merge_in_place(&mut self, mut other: HashSet<T>) {
+        for elem in other.drain() {
+            self.insert(elem);
+        }
+    }
+}
 #[test]
-fn transform_puts() {}
+fn transform_puts() {
+    type TimeKey = (Instant, &'static str);
+    fn map(key: TimeKey, value: &'static str) -> (TimeKey, HashSet<&'static str>) {
+        (key, [value].iter().cloned().collect())
+    }
+    fn image(intervals: IntervalSet<TimeKey>) -> IntervalSet<TimeKey> {
+        intervals
+    }
+    let mut processor = transform(ParBuf::empty(), ParBuf::empty(), map, image);
+    let now = Instant::now();
+    let minute = Duration::from_secs(60);
+    processor.put((now, "a"), "one");
+    processor.put((now, "b"), "two");
+    processor.put((now + minute, "a"), "three");
+    processor.put((now + minute, "b"), "four");
+    assert_eq!(processor.get(true), None);
+
+    let now_intervals = IntervalSet::of(vec![Interval::closed((now, "a"), (now, "z"))]);
+    fn hash_set<T: Clone + Eq + Hash>(elems: &[T]) -> HashSet<T> {
+        elems.iter().cloned().collect()
+    }
+    processor.advance(now_intervals.clone());
+    assert_eq!(
+        processor.get(true),
+        Some(Bundle::new(
+            now_intervals,
+            vec![
+                ((now, "a"), hash_set(&["one"])),
+                ((now, "b"), hash_set(&["two"])),
+            ]
+        ))
+    );
+}
