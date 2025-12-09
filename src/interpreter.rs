@@ -126,6 +126,20 @@ impl Guard {
         }
     }
 
+    /// Create a function guard from independent domain and codomain guards
+    pub fn from_independent_function_parts(domain: Guard, codomain: Guard) -> Self {
+        Guard::union(
+            Guard::Function {
+                domain: Box::new(domain),
+                codomain: Box::new(Guard::Universal),
+            },
+            Guard::Function {
+                domain: Box::new(Guard::Universal),
+                codomain: Box::new(codomain),
+            },
+        )
+    }
+
     /// Create a record guard from field guards
     pub fn from_record_parts(fields: HashMap<String, Guard>) -> Self {
         Guard::Record(fields)
@@ -253,6 +267,17 @@ pub trait Consumer {
 impl<C: Consumer> Consumer for Rc<RefCell<C>> {
     fn notify(&mut self, yield_guard: Guard) {
         self.borrow_mut().notify(yield_guard)
+    }
+}
+
+/// Blanket implementation: FnMut(Guard) implements Consumer.
+/// This allows closures to be used as consumers.
+impl<F> Consumer for F
+where
+    F: FnMut(Guard),
+{
+    fn notify(&mut self, yield_guard: Guard) {
+        self(yield_guard)
     }
 }
 
@@ -717,22 +742,109 @@ impl Producer for VariableRefSubscription {
 // Lambda Operator
 // ============================================================================
 
-/// A no-op consumer that discards all notifications.
-/// Used when we need to subscribe to an operator but don't care about its notifications.
-struct NoOpConsumer;
-
-impl Consumer for NoOpConsumer {
-    fn notify(&mut self, _yield_guard: Guard) {
-        // No-op: discard the notification
-    }
-}
-
 /// A Lambda operator represents a lambda expression.
 /// It has a variable and a body, and manages the variable scope.
 pub struct Lambda {
     variable: Variable,
     body: Box<dyn Operator>,
     extent: Extent,
+}
+
+/// LambdaProducer implements both Producer and Consumer.
+/// As a Consumer: receives notifications from variable and body, tracks yield guards,
+/// and notifies downstream when function bindings are ready.
+/// As a Producer: provides function bindings via get(), handles release.
+struct LambdaProducer {
+    /// Reference to the variable subscription (for domain values)
+    variable_subscription: Rc<RefCell<VariableSubscription>>,
+    /// The body producer (for codomain values)
+    body_producer: Box<dyn Producer>,
+    /// The downstream consumer that will receive notifications
+    downstream_consumer: Box<dyn Consumer>,
+    /// Yield guard from the variable (domain)
+    variable_yield_guard: Guard,
+    /// Yield guard from the body (codomain)
+    body_yield_guard: Guard,
+    /// The intent guard for this lambda subscription
+    intent_guard: Guard,
+}
+
+impl LambdaProducer {
+    /// Create a new LambdaProducer.
+    fn new(
+        variable_subscription: Rc<RefCell<VariableSubscription>>,
+        body_producer: Box<dyn Producer>,
+        downstream_consumer: Box<dyn Consumer>,
+        intent_guard: Guard,
+    ) -> Self {
+        LambdaProducer {
+            variable_subscription,
+            body_producer,
+            downstream_consumer,
+            variable_yield_guard: Guard::Empty,
+            body_yield_guard: Guard::Empty,
+            intent_guard,
+        }
+    }
+
+    /// Check if both variable and body have yielded data, and notify downstream if so.
+    fn check_and_notify(&mut self) {
+        // Both guards must be non-empty for us to have data
+        if !self.variable_yield_guard.is_empty() && !self.body_yield_guard.is_empty() {
+            // Combine the yield guards into a function guard
+            let combined_yield_guard = Guard::from_independent_function_parts(
+                self.variable_yield_guard.clone(),
+                self.body_yield_guard.clone(),
+            );
+
+            let restricted_guard = combined_yield_guard.intersect(self.intent_guard.clone());
+
+            self.downstream_consumer.notify(restricted_guard);
+        }
+    }
+}
+
+impl Producer for LambdaProducer {
+    /// Get the function bindings by combining domain values from the variable
+    /// and codomain values from the body.
+    fn get(&mut self) -> Value {
+        // Get domain values from variable
+        let domain_value = self.variable_subscription.borrow_mut().get();
+
+        // Get codomain values from body
+        let codomain_value = self.body_producer.get();
+
+        // TODO: Properly combine domain and codomain into function bindings
+        // For now, this is a placeholder that assumes single values
+        // In practice, we need to handle collections and align them properly
+        let bindings = vec![FunctionBinding {
+            input: domain_value,
+            output: codomain_value,
+        }];
+
+        Value::Function(bindings)
+    }
+
+    /// Release interest in a region by splitting the obsolete guard and
+    /// releasing both the variable and body.
+    fn release(&mut self, obsolete_guard: Guard) -> Guard {
+        // Split obsolete guard into domain and codomain
+        let (domain_obsolete, codomain_obsolete) = obsolete_guard
+            .split_function()
+            .unwrap_or((Guard::Empty, Guard::Empty));
+
+        // Release the variable (domain)
+        let expanded_domain_obsolete = self
+            .variable_subscription
+            .borrow_mut()
+            .release(domain_obsolete);
+
+        // Release the body (codomain)
+        let expanded_codomain_obsolete = self.body_producer.release(codomain_obsolete);
+
+        // Combine the expanded guards back into a function guard
+        Guard::from_independent_function_parts(expanded_domain_obsolete, expanded_codomain_obsolete)
+    }
 }
 
 impl Lambda {
@@ -772,18 +884,52 @@ impl Operator for Lambda {
             VarScope::new()
         };
 
+        // Create LambdaProducer first (wrapped in Rc<RefCell<>>) so we can capture it in closures
+        let lambda_producer = Rc::new(RefCell::new(LambdaProducer::new(
+            // Placeholder - will be set after subscribing to variable
+            Rc::new(RefCell::new(VariableSubscription::new())),
+            // Placeholder - will be set after subscribing to body
+            Box::new(LiteralProducer { value: Value::Unit }),
+            consumer,
+            intent_guard.clone(),
+        )));
+
+        // Create closure for variable notifications: updates variable_yield_guard and checks if ready
+        let lambda_producer_for_var = lambda_producer.clone();
+        let variable_consumer: Box<dyn Consumer> = Box::new(move |yield_guard: Guard| {
+            let mut producer = lambda_producer_for_var.borrow_mut();
+            producer.variable_yield_guard = yield_guard;
+            producer.check_and_notify();
+        });
+
         // Subscribe to the variable with the domain guard
-        // Use a no-op consumer since the lambda doesn't do anything with notifications from its variable
-        let variable_consumer: Box<dyn Consumer> = Box::new(NoOpConsumer);
-        let subscription = self
-            .variable
-            .subscribe_to_var(domain_guard, variable_consumer, None);
+        let variable_subscription =
+            self.variable
+                .subscribe_to_var(domain_guard, variable_consumer, None);
 
-        new_scope.add_variable(self.variable.name.clone(), subscription);
+        // Update LambdaProducer with the actual variable subscription
+        lambda_producer.borrow_mut().variable_subscription = variable_subscription.clone();
 
-        // Subscribe to the body with the new scope and codomain guard
-        self.body
-            .subscribe(codomain_guard, consumer, Some(new_scope))
+        new_scope.add_variable(self.variable.name.clone(), variable_subscription);
+
+        // Create closure for body notifications: updates body_yield_guard and checks if ready
+        let lambda_producer_for_body = lambda_producer.clone();
+        let body_consumer: Box<dyn Consumer> = Box::new(move |yield_guard: Guard| {
+            let mut producer = lambda_producer_for_body.borrow_mut();
+            producer.body_yield_guard = yield_guard;
+            producer.check_and_notify();
+        });
+
+        // Subscribe to the body with the closure as consumer
+        let body_producer = self
+            .body
+            .subscribe(codomain_guard, body_consumer, Some(new_scope));
+
+        // Update the LambdaProducer with the actual body producer
+        lambda_producer.borrow_mut().body_producer = body_producer;
+
+        // Return the LambdaProducer as a Producer
+        Box::new(lambda_producer)
     }
 }
 
