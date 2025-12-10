@@ -49,18 +49,54 @@ Variables are split into operators and runtime state:
 ### Var Operator
 A `Var` operator represents a variable definition. It holds:
     * The variable's name
-    * The operator that defines this variable (its definition)
-    * The extent of this variable (may be restricted by predicates)
-    * A predicate guard that restricts the variable's extent (applied to guards before propagating to the definition)
+    * The extent of this variable
+    * A predicate guard that restricts the variable's extent (may reference outer variables for correlated scans)
+
+Note: `Var` does **not** hold a static definition. Binding happens dynamically:
+- When the lambda is **applied**, the `Application` operator binds the argument to the variable
+- When the lambda is **aggregated** (e.g., by `sum`), the variable remains unbound and scans its extent
 
 The variable is owned and managed by the operator that defines it (record, lambda, let-binding, pattern match).
 
 ### VarSub (Runtime State)
-A `VarSub` is created when `Var::subscribe()` is called. It implements both `Producer` and `Consumer`:
-    * As a **Consumer**: Receives notifications from the variable's definition, updates the yield guard (monotonically growing), and forwards notifications to all registered consumers
-    * As a **Producer**: Provides data from the definition and handles release requests
-    * Maintains a list of all consumers that have subscribed to this variable (multiple `VarRef`s can reference the same variable)
+A `VarSub` is created when `Var::subscribe()` is called. It can operate in two modes:
+
+**Bound Mode** (lambda applied to argument):
+    * Wraps a producer from the binding expression
+    * Forwards values from that producer
+
+**Scanning Mode** (lambda aggregated):
+    * Iterates over the variable's extent
+    * Applies predicate to filter values
+    * For correlated predicates (referencing outer variables): executes as a join
+    * Produces `parent_indices` relating scan results to outer scans
+
+Common to both modes:
+    * Maintains a list of all consumers that have subscribed to this variable
     * Stores a release guard for use by variable references
+    * Stores `parent_indices` for alignment (scanning mode only)
+
+```rust
+enum VarSource {
+    Bound(Box<dyn Producer>),
+    Scanning {
+        extent: Extent,
+        predicate: Guard,
+        correlations: Vec<Correlation>,  // outer variables in predicate
+    },
+}
+
+struct Correlation {
+    outer_variable: String,
+    join_strategy: JoinStrategy,
+}
+
+enum JoinStrategy {
+    CartesianProduct,
+    HashJoin { key_expr: Expr },
+    // Future: IndexLookup, MergeJoin, etc.
+}
+```
 
 When release is called on a function, its domain release guard is stored in the `VarSub` for use within the function body.
 
@@ -72,7 +108,20 @@ A `VarRef` operator represents a reference to a variable. It holds:
 ### VarRefSub (Runtime State)
 A `VarRefSub` is created when `VarRef::subscribe()` is called. It implements `Producer`:
     * Filters data from the `VarSub` based on its intent guard
+    * **Handles alignment**: If referencing an outer variable from within an inner scan, expands values using the inner scan's `parent_indices`
     * When `release()` is called, returns the stored release guard from the `VarSub` rather than invoking release on the subscription itself (since the lambda would have already invoked it)
+
+```rust
+struct VarRefSub {
+    var_sub: Rc<RefCell<VarSub>>,
+    intent_guard: Guard,
+    consumer: Box<dyn Consumer>,
+    // The innermost scan in scope (for alignment)
+    innermost_scan: Option<Rc<RefCell<VarSub>>>,
+}
+```
+
+The `innermost_scan` is set by `VarScope` when the variable is looked up. If the referenced variable is from an outer scope and there's a scanning variable at an inner level, alignment is needed.
 
 ### Variable Lookup: VarScope
 Variables are looked up by name using a `VarScope` structure:
@@ -111,10 +160,104 @@ The variable system works as follows:
     * Returns the stored release guard from the `VarSub`
     * Does not propagate release to the definition (the lambda handles that)
 
-### Quantification
-Variables are quantified as either existential or universal. Let-bindings, records, and patterns are existentially quantified, which means they have a single definition. Lambda variables are universally quantified, which means they can be bound to many definitions. Quantification applies within each variable's scope (e.g., the part of the dataflow graph corresponding to the lambda's body). Additional bookkeeping within the dataflow graph is required to keep variables aligned as data flows through the graph (I think this can be orchestrated by the lambda operator).
+### Quantification and Variable Binding Modes
 
-For example, consider `sum(let one = 1 in λ row . let field = col1 row + 1 in one + (col2 row) + field)`. To evaluate the sum, we must iterate through the possible values of `row`. Inside of the lambda, the value of `one` remains constant as `row` and `field` change. As the dataflow operator for `one + (col2 row) + field` executes, something must ensure that `Get` on each of the variables in that expression return values that correspond to each other (specifically, `one` must return all `1`s as the other fields vary). When there are multiple universally-quantified variables in scope, the bookkeping must iterate through all valid combinations of those variables (i.e. perform a join). Predicates on variables are specified as proposition arguments to lambdas using dependent types.
+Variables are quantified as either existential or universal:
+- **Existential** (let-bindings, records, patterns): Single definition, variable is always **bound**
+- **Universal** (lambda variables): Can be bound or scanned depending on context
+
+Lambda variables have two modes:
+
+| Mode | When | Behavior |
+|------|------|----------|
+| **Bound** | Lambda is applied (`(\x. body) arg`) | Variable forwards values from argument expression |
+| **Scanning** | Lambda is aggregated (`sum(\x. body)`) | Variable scans over its extent (like a table scan) |
+
+A problem arises when there are multiple variables in **scanning mode** in the same scope (i.e. nested lambdas being aggregated): the different variables need to be aligned with respect to each other so that expressions over both of them evaluate over corresponding values.
+
+### Columnar Values and Alignment
+
+To support vectorized execution, `Value` is extended to a columnar representation:
+
+```rust
+struct ColumnValue {
+    values: Vec<ScalarValue>,
+    // Indices into parent level's batch (for alignment with outer scans)
+    // None if this is the outermost level or independent
+    parent_indices: Option<Vec<usize>>,
+}
+```
+
+When evaluating expressions with multiple universally-quantified variables in scope, `parent_indices` tracks which values correspond to which "rows" of the enclosing scan. This enables:
+- Proper alignment of values from different nesting levels
+- Efficient join execution between nested scans
+- Vectorized operations on aligned batches
+
+### Scans as Joins
+
+When there are nested scanning lambdas, the execution is conceptually a join:
+
+```
+sum(\t1. sum(\t2. f(t1, t2)))
+```
+
+This is equivalent to:
+```sql
+SELECT sum(f(t1, t2)) FROM t1, t2 [WHERE predicate]
+```
+
+Join behavior depends on predicates:
+- **No predicate**: Cartesian product (cross join)
+- **Equality predicate** (`t2.fk = t1.pk`): Hash join or index lookup
+- **Other predicates**: Filter after join, or specialized index structures
+
+The `parent_indices` in a `ColumnValue` are the output of the join algorithm—they indicate which outer row each inner row is paired with.
+
+### Alignment via VarRefSub
+
+When a `VarRef` references an outer variable from within an inner scan, the `VarRefSub` handles alignment:
+
+1. `VarScope` tracks the **innermost scan** in scope
+2. When `VarRefSub::get()` is called for an outer variable:
+   - Get the outer variable's values
+   - Get `parent_indices` from the innermost scan
+   - Expand outer values: `outer_values[parent_indices[i]]` for each `i`
+3. All values at the innermost level are now aligned and can be zipped by operators
+
+
+### Example: Nested Scans
+
+For `sum(\t1. sum(\t2 where t2.fk = t1.pk. v(t1) + v(t2)))`:
+
+1. **Outer scan (t1)** yields batch: `[A, B, C]`
+
+2. **Inner scan (t2)** sees predicate `t2.fk = t1.pk`:
+   - Recognizes correlation with `t1`
+   - Uses hash join: builds hash table on `t1.pk`, probes with `t2.fk`
+   - Yields matching rows with `parent_indices`
+
+3. **t2 batch**:
+   ```
+   values: [t2_row1, t2_row2, t2_row3, t2_row4]
+   parent_indices: [0, 0, 1, 2]  // rows 1,2 match A; row 3 matches B; row 4 matches C
+   ```
+
+4. **VarRef for t1** (inside inner body):
+   - Gets t1 values: `[A, B, C]`
+   - Expands using t2's parent_indices: `[A, A, B, C]`
+   - Now aligned with t2 values
+
+5. **v(t1) + v(t2)** operates on aligned batches of length 4
+
+### VarScope: Tracking Innermost Scan
+
+`VarScope` is extended to track alignment context.
+
+When Lambda creates a child scope for its body:
+- If the variable is scanning (not bound), it becomes the `innermost_scan`
+- `VarRef` lookups receive both the variable subscription and the innermost scan
+- Outer variable references use the innermost scan's `parent_indices` for expansion
+- TODO: this doesn't handle nesting levels greater than 2. Need to compose through multiple `parent_indices`.
 
 ## Records
 A record is a map of field names to field definitions. Each field's definition is a dataflow operator. Subscribe splits the provided guard into a guard for each field, and calls subscribe on each corresponding field's operator. Notify is called by each field's operator when ready. Get zips together the data for the record's fields (TODO: how do we handle alignment when some fields of a record are ready, but others aren't? Maybe we only return when all subscribed fields are available). Release splits the obsolete guard and propagates the subguards to each field (TODO: how to handle correlated guards?).
@@ -184,6 +327,35 @@ Release drops bindings for the given obsolete guard. It does not propagate upstr
 
 # How to handle Cycles
 Many of the above algorithms will not terminate if there's a cycle in the dataflow graph. How do we need to modify them to ensure termination? In which cases can we ensure convergence rather than simply truncating the iteration?
+
+
+# Open Challenges / Deferred Work
+
+## Streaming Joins
+The current join design assumes nothing happens until all data has been scanned. For true streaming joins, where yield guards advance gradually:
+- How do we execute joins incrementally as new batches arrive?
+- When can we emit partial results vs. waiting for a universal yield guard?
+
+Potential approaches:
+- Symmetric hash join: build hash tables on both sides, emit matches as data arrives
+- Windowed joins: partition by time/sequence and join within windows
+
+## Guard Expression Evaluation
+The current design assumes guards can be evaluated, but complex guard expressions present challenges:
+- Guards may contain arbitrary expressions (e.g., `t2.fk = t1.pk + 1`)
+- These expressions need access to variable values, which requires the dataflow machinery
+- Circular dependency: need to evaluate guard to set up dataflow, but need dataflow to evaluate guard. 
+
+Potential approaches:
+- Restrict guards to simple predicates (equality on columns)
+- Set up dataflow operators to compute these guards and feed them into the operators that need them
+- Two-phase evaluation: first pass extracts guard structure, second pass evaluates
+
+## Multi-Level Nesting Optimization
+For deeply nested scans (`\t1. \t2. \t3. ...`):
+- Composing parent_indices through multiple levels may be inefficient
+- May want to precompute transitive indices (t1→t3 directly)
+- Trade-off between space (storing more indices) and time (recomputing)
 
 
 # PCL Proof of Concept
