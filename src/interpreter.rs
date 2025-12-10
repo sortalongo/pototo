@@ -1048,4 +1048,232 @@ mod tests {
         let released = producer.release(Guard::universal());
         assert_eq!(released, Guard::Empty);
     }
+
+    #[test]
+    fn test_lambda_extent() {
+        // Create a lambda: λ x . x (identity function)
+        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(0))));
+        let body = Box::new(VariableRef::new(
+            "x".to_string(),
+            Extent::Base(BaseType::Int),
+        ));
+        let lambda = Lambda::new(variable, body);
+
+        // Check that extent is a function from Int to Int
+        let extent = lambda.extent();
+        match extent {
+            Extent::Function { domain, codomain } => {
+                assert_eq!(domain.as_ref(), &Extent::Base(BaseType::Int));
+                assert_eq!(codomain.as_ref(), &Extent::Base(BaseType::Int));
+            }
+            _ => panic!("Expected function extent, got {:?}", extent),
+        }
+    }
+
+    #[test]
+    fn test_lambda_simple_identity() {
+        // Create a lambda: λ x . x (identity function)
+        // Variable is a literal that will be replaced when applied
+        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(42))));
+        // Body just returns the variable
+        let body = Box::new(VariableRef::new(
+            "x".to_string(),
+            Extent::Base(BaseType::Int),
+        ));
+        let mut lambda = Lambda::new(variable, body);
+
+        // Subscribe to the lambda
+        let (consumer, notifications) = TestConsumer::new();
+        let mut producer = lambda.subscribe(Guard::universal(), Box::new(consumer), None);
+
+        // Wait a bit for notifications - both variable and body need to notify
+        // The variable should notify immediately (it's a literal)
+        // The body should also notify (it references the variable which is ready)
+
+        // Check notifications - we should get one when both are ready
+        let notifications_borrowed = notifications.borrow();
+        // Note: The exact number of notifications depends on the implementation
+        // At minimum, we should get at least one notification when both guards are ready
+        assert!(
+            notifications_borrowed.len() >= 1,
+            "Expected at least 1 notification, got {}",
+            notifications_borrowed.len()
+        );
+
+        // Get the function bindings
+        let value = producer.get();
+        match value {
+            Value::Function(bindings) => {
+                assert_eq!(bindings.len(), 1);
+                assert_eq!(bindings[0].input, Value::Int(42));
+                assert_eq!(bindings[0].output, Value::Int(42));
+            }
+            _ => panic!("Expected Function value, got {:?}", value),
+        }
+    }
+
+    #[test]
+    fn test_lambda_with_literal_body() {
+        // Create a lambda: λ x . 10 (constant function)
+        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(0))));
+        let body = Box::new(Literal::new(Value::Int(10)));
+        let mut lambda = Lambda::new(variable, body);
+
+        // Subscribe to the lambda
+        let (consumer, notifications) = TestConsumer::new();
+        let mut producer = lambda.subscribe(Guard::universal(), Box::new(consumer), None);
+
+        // Both variable and body should notify (both are literals)
+        let notifications_borrowed = notifications.borrow();
+        assert!(
+            notifications_borrowed.len() >= 1,
+            "Expected at least 1 notification, got {}",
+            notifications_borrowed.len()
+        );
+
+        // Get the function bindings
+        let value = producer.get();
+        match value {
+            Value::Function(bindings) => {
+                assert_eq!(bindings.len(), 1);
+                // Input is from variable (literal 0)
+                assert_eq!(bindings[0].input, Value::Int(0));
+                // Output is from body (literal 10)
+                assert_eq!(bindings[0].output, Value::Int(10));
+            }
+            _ => panic!("Expected Function value, got {:?}", value),
+        }
+    }
+
+    #[test]
+    fn test_lambda_release() {
+        // Create a lambda: λ x . x
+        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(42))));
+        let body = Box::new(VariableRef::new(
+            "x".to_string(),
+            Extent::Base(BaseType::Int),
+        ));
+        let mut lambda = Lambda::new(variable, body);
+
+        // Subscribe to the lambda
+        let (consumer, _) = TestConsumer::new();
+        let mut producer = lambda.subscribe(Guard::universal(), Box::new(consumer), None);
+
+        // Call get to ensure everything is set up
+        let _value = producer.get();
+
+        // Release with a function guard
+        let release_guard = Guard::from_function_parts(Guard::universal(), Guard::universal());
+        let released = producer.release(release_guard);
+
+        // The released guard should be a function guard (possibly expanded)
+        // We just verify it's not empty
+        assert!(!released.is_empty());
+    }
+
+    #[test]
+    fn test_lambda_with_function_guard() {
+        // Create a lambda: λ x . x
+        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(42))));
+        let body = Box::new(VariableRef::new(
+            "x".to_string(),
+            Extent::Base(BaseType::Int),
+        ));
+        let mut lambda = Lambda::new(variable, body);
+
+        // Subscribe with a function guard
+        let domain_guard = Guard::Equality {
+            variable: "x".to_string(),
+            value: Value::Int(42),
+        };
+        let codomain_guard = Guard::universal();
+        let intent_guard = Guard::from_function_parts(domain_guard, codomain_guard);
+
+        let (consumer, notifications) = TestConsumer::new();
+        let mut producer = lambda.subscribe(intent_guard, Box::new(consumer), None);
+
+        // Should receive notification
+        let notifications_borrowed = notifications.borrow();
+        assert!(
+            notifications_borrowed.len() >= 1,
+            "Expected at least 1 notification"
+        );
+
+        // Get should work
+        let value = producer.get();
+        match value {
+            Value::Function(bindings) => {
+                assert!(!bindings.is_empty());
+            }
+            _ => panic!("Expected Function value"),
+        }
+    }
+
+    #[test]
+    fn test_lambda_nested_scope() {
+        // Test that lambda creates a new scope for its variable
+        // Create: λ x . x where x is defined in the lambda
+        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(100))));
+        let body = Box::new(VariableRef::new(
+            "x".to_string(),
+            Extent::Base(BaseType::Int),
+        ));
+        let mut lambda = Lambda::new(variable, body);
+
+        // Create a parent scope with a different variable
+        let mut parent_scope = VarScope::new();
+        let parent_literal = Literal::new(Value::Int(200));
+        let mut parent_variable = Variable::new("x".to_string(), Box::new(parent_literal));
+        let (parent_consumer, _) = TestConsumer::new();
+        let parent_subscription =
+            parent_variable.subscribe_to_var(Guard::universal(), Box::new(parent_consumer), None);
+        parent_scope.add_variable("x".to_string(), parent_subscription);
+
+        // Subscribe to lambda with parent scope
+        // The lambda should create its own scope, so the body should reference
+        // the lambda's variable, not the parent's
+        let (consumer, _) = TestConsumer::new();
+        let mut producer =
+            lambda.subscribe(Guard::universal(), Box::new(consumer), Some(parent_scope));
+
+        // Get the value - should use lambda's variable (100), not parent's (200)
+        let value = producer.get();
+        match value {
+            Value::Function(bindings) => {
+                assert_eq!(bindings.len(), 1);
+                // The input should be from the lambda's variable definition
+                assert_eq!(bindings[0].input, Value::Int(100));
+                // The output should also be 100 (identity function)
+                assert_eq!(bindings[0].output, Value::Int(100));
+            }
+            _ => panic!("Expected Function value"),
+        }
+    }
+
+    #[test]
+    fn test_lambda_notifications_from_both_sources() {
+        // Test that notifications work correctly when both variable and body notify
+        // Create a lambda where both variable and body are literals (they notify immediately)
+        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(1))));
+        let body = Box::new(Literal::new(Value::Int(2)));
+        let mut lambda = Lambda::new(variable, body);
+
+        let (consumer, notifications) = TestConsumer::new();
+        let _producer = lambda.subscribe(Guard::universal(), Box::new(consumer), None);
+
+        // Both variable and body should notify, and LambdaProducer should
+        // notify downstream when both are ready
+        let notifications_borrowed = notifications.borrow();
+        // We should get at least one notification when both guards are ready
+        assert!(
+            notifications_borrowed.len() >= 1,
+            "Expected notification when both variable and body are ready, got {}",
+            notifications_borrowed.len()
+        );
+
+        // The notification should be a function guard (or restricted version)
+        let last_notification = notifications_borrowed.last().unwrap();
+        // It should not be empty
+        assert!(!last_notification.is_empty());
+    }
 }
