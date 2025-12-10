@@ -6,7 +6,7 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 ## Architecture
 
 ### Core Concepts
-- **Operators**: Stateless, correspond to program syntax (e.g., `Literal`, `Variable`, `VariableRef`, `Lambda`)
+- **Operators**: Stateless, correspond to program syntax (e.g., `Literal`, `Var`, `VarRef`, `Lambda`)
 - **Producers/Consumers**: Runtime stateful objects created from operators via `subscribe()`
 - **Guards**: Represent regions (subsets of extent) via predicates. Monotonically growing.
 - **Extents**: Represent the set of values a term can take on (its type)
@@ -19,7 +19,7 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 
 ### Key Design Decisions
 1. **Blanket implementations**: `Rc<RefCell<P>>` implements `Producer` when `P: Producer`, and `Rc<RefCell<C>>` implements `Consumer` when `C: Consumer`
-2. **Variable system**: Variables are split into `Variable` (operator) and `VariableSubscription` (runtime state)
+2. **Variable system**: Variables are split into `Var` (operator) and `VarSub` (runtime state)
 3. **VarScope**: Linked list structure for variable lookup with parent chaining
 
 ## Completed ✅
@@ -28,7 +28,7 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 - [x] `Guard` enum with predicates (Equality, Membership, Inequality, And, Or, Function, Record)
 - [x] `Extent` enum (Base, Function, Record, Union)
 - [x] `Value` enum for runtime data representation
-- [x] `FunctionBinding` for function input-output pairs
+- [x] `FuncBinding` for function input-output pairs
 
 ### Step 2: Producer/Consumer Traits
 - [x] `Consumer` trait with `notify()` method
@@ -43,13 +43,13 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 - [x] Tests for integer and string literals
 
 ### Step 4: Variable System
-- [x] `Variable` operator (name, definition, extent, predicate)
-- [x] `VariableSubscription` (implements both `Producer` and `Consumer`)
+- [x] `Var` operator (name, definition, extent, predicate)
+- [x] `VarSub` (implements both `Producer` and `Consumer`)
   - Stores yield guard (monotonically growing)
   - Manages list of consumers
   - Stores release guard for variable references
-- [x] `VariableRef` operator (looks up variable by name in VarScope)
-- [x] `VariableRefSubscription` producer (filters data based on intent guard)
+- [x] `VarRef` operator (looks up variable by name in VarScope)
+- [x] `VarRefSub` producer (filters data based on intent guard)
 - [x] `VarScope` for variable lookup with parent chaining
 - [x] Basic variable test
 
@@ -75,15 +75,15 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
    - Compute function extent from variable extent (domain) and body extent (codomain)
    - Store it in Lambda struct to avoid recomputation
 
-2. **Implement data filtering in VariableRefSubscription**
-   - Filter data from VariableSubscription based on intent guard
+2. **Implement data filtering in VarRefSub**
+   - Filter data from VarSub based on intent guard
    - Currently returns full value
 
 3. **Implement Application operator**
    - Handle function application with proper guard propagation
    - Implement bidirectional release flow as specified in design doc
 
-4. **Fix Variable::get_last_subscription() workaround**
+4. **Fix Var::get_last_subscription() workaround**
    - Currently using a temporary storage mechanism
    - Should be replaced with proper architecture
 
@@ -117,16 +117,16 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 ## Architecture Notes
 
 ### Variable System Flow
-1. `Lambda::subscribe()` creates `VariableSubscription` for lambda variable
+1. `Lambda::subscribe()` creates `VarSub` for lambda variable
 2. Adds it to new `VarScope` with parent scope chained
 3. Subscribes to body with new scope
-4. When body contains `VariableRef`, it looks up variable in scope
-5. `VariableRef::subscribe()` adds consumer to `VariableSubscription`'s consumers vec
-6. Returns `VariableRefSubscription` that filters data
+4. When body contains `VarRef`, it looks up variable in scope
+5. `VarRef::subscribe()` adds consumer to `VarSub`'s consumers vec
+6. Returns `VarRefSub` that filters data
 
 ### Guard Monotonicity
 - The contract of `notify()` guarantees that guards are monotonically growing
-- `VariableSubscription` stores a single yield guard (not a vec)
+- `VarSub` stores a single yield guard (not a vec)
 - Guards are unioned when updated (though current implementation just replaces - needs fix)
 
 ### Memory Management
@@ -142,9 +142,9 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 - [ ] Integration tests
 
 ## Next Steps (Immediate)
-1. Fix `VariableSubscription::notify()` to use union instead of replacement for yield guard
+1. Fix `VarSub::notify()` to use union instead of replacement for yield guard
 2. Implement `Lambda::extent()` properly
-3. Add data filtering to `VariableRefSubscription::get()`
+3. Add data filtering to `VarRefSub::get()`
 4. Start Application operator implementation
 
 ## Questions / Open Issues

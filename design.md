@@ -32,7 +32,7 @@ Progress is tracked by sending puntuations through this producer/consumer interf
         * Release(Guard): the consumer retracts interest in a sub-region of its subscription with the producer in the form of an **obsolete guard**.
 
     * **Operator vs Runtime State**: There is an important distinction between operators and runtime state:
-        * **Operators** are stateless and correspond to program syntax. They implement the `Operator` trait and include: `Literal`, `Variable`, `VariableRef`, `Lambda`, `Application`, etc. Each operator has an extent (its type) but no runtime state.
+        * **Operators** are stateless and correspond to program syntax. They implement the `Operator` trait and include: `Literal`, `Var`, `VarRef`, `Lambda`, `Application`, etc. Each operator has an extent (its type) but no runtime state.
         * **Producers and Consumers** are runtime stateful objects created when `subscribe()` is called on an operator. They implement the `Producer` and `Consumer` traits respectively, and maintain all the runtime state needed for dataflow execution (yield guards, consumers lists, etc.).
         * When `Operator::subscribe()` is called, it creates the appropriate producer/consumer objects and wires them up according to the operator's semantics.
 
@@ -46,8 +46,8 @@ Subscribe calls Notify on the consumer immediately. Notify calls Get. Get return
 
 Variables are split into operators and runtime state:
 
-### Variable Operator
-A `Variable` operator represents a variable definition. It holds:
+### Var Operator
+A `Var` operator represents a variable definition. It holds:
     * The variable's name
     * The operator that defines this variable (its definition)
     * The extent of this variable (may be restricted by predicates)
@@ -55,28 +55,28 @@ A `Variable` operator represents a variable definition. It holds:
 
 The variable is owned and managed by the operator that defines it (record, lambda, let-binding, pattern match).
 
-### VariableSubscription (Runtime State)
-A `VariableSubscription` is created when `Variable::subscribe()` is called. It implements both `Producer` and `Consumer`:
+### VarSub (Runtime State)
+A `VarSub` is created when `Var::subscribe()` is called. It implements both `Producer` and `Consumer`:
     * As a **Consumer**: Receives notifications from the variable's definition, updates the yield guard (monotonically growing), and forwards notifications to all registered consumers
     * As a **Producer**: Provides data from the definition and handles release requests
-    * Maintains a list of all consumers that have subscribed to this variable (multiple `VariableRef`s can reference the same variable)
+    * Maintains a list of all consumers that have subscribed to this variable (multiple `VarRef`s can reference the same variable)
     * Stores a release guard for use by variable references
 
-When release is called on a function, its domain release guard is stored in the `VariableSubscription` for use within the function body.
+When release is called on a function, its domain release guard is stored in the `VarSub` for use within the function body.
 
-### VariableRef Operator
-A `VariableRef` operator represents a reference to a variable. It holds:
+### VarRef Operator
+A `VarRef` operator represents a reference to a variable. It holds:
     * The name of the variable being referenced
     * The extent (cached from the variable when found)
 
-### VariableRefSubscription (Runtime State)
-A `VariableRefSubscription` is created when `VariableRef::subscribe()` is called. It implements `Producer`:
-    * Filters data from the `VariableSubscription` based on its intent guard
-    * When `release()` is called, returns the stored release guard from the `VariableSubscription` rather than invoking release on the subscription itself (since the lambda would have already invoked it)
+### VarRefSub (Runtime State)
+A `VarRefSub` is created when `VarRef::subscribe()` is called. It implements `Producer`:
+    * Filters data from the `VarSub` based on its intent guard
+    * When `release()` is called, returns the stored release guard from the `VarSub` rather than invoking release on the subscription itself (since the lambda would have already invoked it)
 
 ### Variable Lookup: VarScope
 Variables are looked up by name using a `VarScope` structure:
-    * `VarScope` is a linked list structure that maps variable names to their `VariableSubscription` objects
+    * `VarScope` is a linked list structure that maps variable names to their `VarSub` objects
     * Supports parent chaining for nested scopes (e.g., lambdas within lambdas)
     * When looking up a variable, the scope searches up the parent chain if not found in the current scope
     * `VarScope` is passed through `subscribe()` calls to enable variable lookup
@@ -85,30 +85,30 @@ Variables are looked up by name using a `VarScope` structure:
 
 The variable system works as follows:
 
-1. **Variable Definition**: When `Variable::subscribe()` is called:
-    * Creates a `VariableSubscription` 
+1. **Variable Definition**: When `Var::subscribe()` is called:
+    * Creates a `VarSub` 
     * Adds the original consumer (from the subscribe call) to the subscription's consumers list
     * Uses the subscription itself (wrapped in `Rc<RefCell<>>`) as the consumer for the definition operator
     * Subscribes to the definition operator
     * Returns the subscription as a producer
 
-2. **Variable Reference**: When `VariableRef::subscribe()` is called:
+2. **Variable Reference**: When `VarRef::subscribe()` is called:
     * Looks up the variable name in the provided `VarScope` (searching up the parent chain if needed)
-    * Adds itself as a consumer to the found `VariableSubscription`'s consumers list
-    * Creates and returns a `VariableRefSubscription` that filters data based on the intent guard
+    * Adds itself as a consumer to the found `VarSub`'s consumers list
+    * Creates and returns a `VarRefSub` that filters data based on the intent guard
 
 3. **Notification Flow**: When the definition operator notifies:
-    * Notification goes to `VariableSubscription::notify()`
+    * Notification goes to `VarSub::notify()`
     * The yield guard is updated 
-    * All registered consumers (including all `VariableRefSubscription`s) are notified with the updated yield guard
+    * All registered consumers (including all `VarRefSub`s) are notified with the updated yield guard
 
-4. **Data Access**: When a `VariableRefSubscription` calls `get()`:
-    * It retrieves data from the `VariableSubscription`
+4. **Data Access**: When a `VarRefSub` calls `get()`:
+    * It retrieves data from the `VarSub`
     * Filters the data based on its intent guard 
     * Returns the filtered data
 
-5. **Release Flow**: When a `VariableRefSubscription` calls `release()`:
-    * Returns the stored release guard from the `VariableSubscription`
+5. **Release Flow**: When a `VarRefSub` calls `release()`:
+    * Returns the stored release guard from the `VarSub`
     * Does not propagate release to the definition (the lambda handles that)
 
 ### Quantification
@@ -146,13 +146,13 @@ Most of the time, this complex flow boils down to "get a domain guard from the a
 
 
 ## Lambdas
-A lambda is a (universally quantified) variable and a body, which can be applied to another term to replace the variable with that term. To accomplish this, the lambda operator manages a Variable. 
+A lambda is a (universally quantified) variable and a body, which can be applied to another term to replace the variable with that term. To accomplish this, the lambda operator manages a Var. 
 
 Subscribe splits its intent guard into domain and codomain intent guards, then calls subscribe on its variable and body with these guards. 
 
-Notify comes from the variable, and is handled by the Variable. Get returns a collection of function bindings. 
+Notify comes from the variable, and is handled by the Var. Get returns a collection of function bindings. 
 
-Release splits the obsolete guard on domain and codomain, and calls release on the Variable and the body with the corresponding guard. The Variable stores its obsolete guard until the release call on the body returns so that variable references in the body can return expanded obsolete guards as needed.
+Release splits the obsolete guard on domain and codomain, and calls release on the Var and the body with the corresponding guard. The Var stores its obsolete guard until the release call on the body returns so that variable references in the body can return expanded obsolete guards as needed.
 
 
 ## Memos

@@ -236,14 +236,14 @@ pub enum Value {
     Bool(bool),
     Unit,
     /// A function value (collection of bindings)
-    Function(Vec<FunctionBinding>),
+    Function(Vec<FuncBinding>),
     /// A record value
     Record(HashMap<String, Value>),
 }
 
 /// A function binding represents a single input-output pair for a function
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionBinding {
+pub struct FuncBinding {
     pub input: Value,
     pub output: Value,
 }
@@ -437,7 +437,7 @@ pub struct VarScope {
     /// Optional parent scope (for nested scopes)
     parent: Option<Box<VarScope>>,
     /// Map of variable names to their subscriptions (shared state)
-    variables: HashMap<String, Rc<RefCell<VariableSubscription>>>,
+    variables: HashMap<String, Rc<RefCell<VarSub>>>,
 }
 
 impl VarScope {
@@ -458,13 +458,13 @@ impl VarScope {
     }
 
     /// Add a variable to this scope.
-    pub fn add_variable(&mut self, name: String, subscription: Rc<RefCell<VariableSubscription>>) {
+    pub fn add_variable(&mut self, name: String, subscription: Rc<RefCell<VarSub>>) {
         self.variables.insert(name, subscription);
     }
 
     /// Look up a variable by name, searching up the parent chain.
     /// Returns a reference to the subscription if found.
-    pub fn lookup_variable(&self, name: &str) -> Option<&Rc<RefCell<VariableSubscription>>> {
+    pub fn lookup_variable(&self, name: &str) -> Option<&Rc<RefCell<VarSub>>> {
         if let Some(subscription) = self.variables.get(name) {
             Some(subscription)
         } else if let Some(ref parent) = self.parent {
@@ -475,9 +475,9 @@ impl VarScope {
     }
 }
 
-/// A Variable operator represents a variable definition.
+/// A Var operator represents a variable definition.
 /// It holds all statically-defined information: name, definition operator, extent, and predicate.
-pub struct Variable {
+pub struct Var {
     /// The name of the variable
     name: String,
     /// The operator that defines this variable
@@ -489,11 +489,11 @@ pub struct Variable {
     predicate: Guard,
 }
 
-impl Variable {
+impl Var {
     /// Create a new variable operator.
     pub fn new(name: String, definition: Box<dyn Operator>) -> Self {
         let extent = definition.extent().clone();
-        Variable {
+        Var {
             name,
             definition,
             extent,
@@ -508,7 +508,7 @@ impl Variable {
         self.predicate = predicate;
     }
 
-    /// Subscribe to this variable and return the VariableSubscription directly.
+    /// Subscribe to this variable and return the VarSub directly.
     /// This is useful when you need access to the subscription object (e.g., for adding to VarScope).
     /// The regular Operator::subscribe wraps this in Box<dyn Producer>.
     pub fn subscribe_to_var(
@@ -516,13 +516,13 @@ impl Variable {
         intent_guard: Guard,
         consumer: Box<dyn Consumer>,
         var_scope: Option<VarScope>,
-    ) -> Rc<RefCell<VariableSubscription>> {
+    ) -> Rc<RefCell<VarSub>> {
         // Apply predicate to intent guard
         let restricted_guard = intent_guard.intersect(self.predicate.clone());
 
-        // Create VariableSubscription first (it will act as consumer for the definition)
+        // Create VarSub first (it will act as consumer for the definition)
         // TODO: does using RC for passing this struct both up and down the tree create a memory leak?
-        let subscription = Rc::new(RefCell::new(VariableSubscription::new()));
+        let subscription = Rc::new(RefCell::new(VarSub::new()));
 
         // Add the original consumer to the subscription's consumers vec
         subscription.borrow_mut().add_consumer(consumer);
@@ -544,7 +544,7 @@ impl Variable {
     }
 }
 
-impl Operator for Variable {
+impl Operator for Var {
     fn extent(&self) -> &Extent {
         &self.extent
     }
@@ -561,9 +561,9 @@ impl Operator for Variable {
     }
 }
 
-/// VariableSubscription implements both Producer and Consumer.
+/// VarSub implements both Producer and Consumer.
 /// It stores the yield guard (monotonically growing) and forwards notifications to all consumers.
-pub struct VariableSubscription {
+pub struct VarSub {
     /// The producer from the variable's definition
     definition_producer: Option<Box<dyn Producer>>,
     /// The current yield guard (monotonically growing)
@@ -575,9 +575,9 @@ pub struct VariableSubscription {
     stored_release_guard: Guard,
 }
 
-impl VariableSubscription {
+impl VarSub {
     fn new() -> Self {
-        VariableSubscription {
+        VarSub {
             definition_producer: None,
             yield_guard: Guard::Empty,
             consumers: Vec::new(),
@@ -616,7 +616,7 @@ impl VariableSubscription {
     }
 }
 
-impl Producer for VariableSubscription {
+impl Producer for VarSub {
     fn get(&mut self) -> Value {
         self.definition_producer
             .as_mut()
@@ -635,7 +635,7 @@ impl Producer for VariableSubscription {
     }
 }
 
-impl Consumer for VariableSubscription {
+impl Consumer for VarSub {
     /// Notify this subscription of a yield guard (called by definition).
     fn notify(&mut self, yield_guard: Guard) {
         self.yield_guard = yield_guard.clone();
@@ -648,23 +648,23 @@ impl Consumer for VariableSubscription {
     }
 }
 
-/// A VariableRef operator represents a reference to a variable.
+/// A VarRef operator represents a reference to a variable.
 /// It holds the variable name and looks it up in the VarScope when subscribing.
-pub struct VariableRef {
+pub struct VarRef {
     /// The name of the variable being referenced
     name: String,
     /// The extent (cached from the variable when found)
     extent: Extent,
 }
 
-impl VariableRef {
+impl VarRef {
     /// Create a new variable reference.
     pub fn new(name: String, extent: Extent) -> Self {
-        VariableRef { name, extent }
+        VarRef { name, extent }
     }
 }
 
-impl Operator for VariableRef {
+impl Operator for VarRef {
     fn extent(&self) -> &Extent {
         &self.extent
     }
@@ -676,20 +676,20 @@ impl Operator for VariableRef {
         var_scope: Option<VarScope>,
     ) -> Box<dyn Producer> {
         // Look up the variable in the scope
-        let var_scope = var_scope.expect("VariableRef requires a VarScope");
+        let var_scope = var_scope.expect("VarRef requires a VarScope");
         let variable_subscription = var_scope
             .lookup_variable(&self.name)
             .expect(&format!("Variable '{}' not found in scope", self.name))
             .clone();
 
-        // Create VariableRefSubscription with the consumer stored
-        let ref_subscription = Rc::new(RefCell::new(VariableRefSubscription {
+        // Create VarRefSub with the consumer stored
+        let ref_subscription = Rc::new(RefCell::new(VarRefSub {
             variable_subscription: variable_subscription.clone(),
             intent_guard,
             consumer,
         }));
 
-        // Add the VariableRefSubscription as the consumer of the variable subscription
+        // Add the VarRefSub as the consumer of the variable subscription
         let ref_subscription_consumer: Box<dyn Consumer> = Box::new(ref_subscription.clone());
         variable_subscription
             .borrow_mut()
@@ -699,20 +699,20 @@ impl Operator for VariableRef {
     }
 }
 
-/// VariableRefSubscription implements both Producer and Consumer.
-/// As a Consumer: it receives notifications from VariableSubscription, intersects
+/// VarRefSub implements both Producer and Consumer.
+/// As a Consumer: it receives notifications from VarSub, intersects
 /// the yield guard with its intent guard, and forwards to the actual consumer.
 /// As a Producer: it provides access to data and handles release requests.
-struct VariableRefSubscription {
-    /// Reference to the VariableSubscription
-    variable_subscription: Rc<RefCell<VariableSubscription>>,
+struct VarRefSub {
+    /// Reference to the VarSub
+    variable_subscription: Rc<RefCell<VarSub>>,
     /// The intent guard for this subscription
     intent_guard: Guard,
     /// The consumer of the variable ref that will receive filtered notifications
     consumer: Box<dyn Consumer>,
 }
 
-impl Consumer for VariableRefSubscription {
+impl Consumer for VarRefSub {
     /// Notify this subscription of a yield guard from the variable.
     fn notify(&mut self, yield_guard: Guard) {
         let restricted_guard = yield_guard.intersect(self.intent_guard.clone());
@@ -720,7 +720,7 @@ impl Consumer for VariableRefSubscription {
     }
 }
 
-impl Producer for VariableRefSubscription {
+impl Producer for VarRefSub {
     fn get(&mut self) -> Value {
         // Get data from variable subscription
         let value = self.variable_subscription.borrow_mut().get();
@@ -745,7 +745,7 @@ impl Producer for VariableRefSubscription {
 /// A Lambda operator represents a lambda expression.
 /// It has a variable and a body, and manages the variable scope.
 pub struct Lambda {
-    variable: Variable,
+    variable: Var,
     body: Box<dyn Operator>,
     extent: Extent,
 }
@@ -756,7 +756,7 @@ pub struct Lambda {
 /// As a Producer: provides function bindings via get(), handles release.
 struct LambdaProducer {
     /// Reference to the variable subscription (for domain values)
-    variable_subscription: Rc<RefCell<VariableSubscription>>,
+    variable_subscription: Rc<RefCell<VarSub>>,
     /// The body producer (for codomain values)
     body_producer: Box<dyn Producer>,
     /// The downstream consumer that will receive notifications
@@ -772,7 +772,7 @@ struct LambdaProducer {
 impl LambdaProducer {
     /// Create a new LambdaProducer.
     fn new(
-        variable_subscription: Rc<RefCell<VariableSubscription>>,
+        variable_subscription: Rc<RefCell<VarSub>>,
         body_producer: Box<dyn Producer>,
         downstream_consumer: Box<dyn Consumer>,
         intent_guard: Guard,
@@ -817,7 +817,7 @@ impl Producer for LambdaProducer {
         // TODO: Properly combine domain and codomain into function bindings
         // For now, this is a placeholder that assumes single values
         // In practice, we need to handle collections and align them properly
-        let bindings = vec![FunctionBinding {
+        let bindings = vec![FuncBinding {
             input: domain_value,
             output: codomain_value,
         }];
@@ -848,7 +848,7 @@ impl Producer for LambdaProducer {
 }
 
 impl Lambda {
-    pub fn new(variable: Variable, body: Box<dyn Operator>) -> Self {
+    pub fn new(variable: Var, body: Box<dyn Operator>) -> Self {
         // Compute the extent: function type from domain (variable) to codomain (body)
         let domain = variable.extent().clone();
         let codomain = body.extent().clone();
@@ -887,7 +887,7 @@ impl Operator for Lambda {
         // Create LambdaProducer first (wrapped in Rc<RefCell<>>) so we can capture it in closures
         let lambda_producer = Rc::new(RefCell::new(LambdaProducer::new(
             // Placeholder - will be set after subscribing to variable
-            Rc::new(RefCell::new(VariableSubscription::new())),
+            Rc::new(RefCell::new(VarSub::new())),
             // Placeholder - will be set after subscribing to body
             Box::new(LiteralProducer { value: Value::Unit }),
             consumer,
@@ -1016,9 +1016,9 @@ mod tests {
     #[test]
     fn test_variable_proxy() {
         let literal = Literal::new(Value::Int(42));
-        let mut variable = Variable::new("x".to_string(), Box::new(literal));
+        let mut variable = Var::new("x".to_string(), Box::new(literal));
         let extent = variable.extent().clone();
-        let mut var_ref = VariableRef::new("x".to_string(), extent);
+        let mut var_ref = VarRef::new("x".to_string(), extent);
 
         assert_eq!(var_ref.extent(), &Extent::Base(BaseType::Int));
 
@@ -1052,11 +1052,8 @@ mod tests {
     #[test]
     fn test_lambda_extent() {
         // Create a lambda: λ x . x (identity function)
-        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(0))));
-        let body = Box::new(VariableRef::new(
-            "x".to_string(),
-            Extent::Base(BaseType::Int),
-        ));
+        let variable = Var::new("x".to_string(), Box::new(Literal::new(Value::Int(0))));
+        let body = Box::new(VarRef::new("x".to_string(), Extent::Base(BaseType::Int)));
         let lambda = Lambda::new(variable, body);
 
         // Check that extent is a function from Int to Int
@@ -1074,12 +1071,9 @@ mod tests {
     fn test_lambda_simple_identity() {
         // Create a lambda: λ x . x (identity function)
         // Variable is a literal that will be replaced when applied
-        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(42))));
+        let variable = Var::new("x".to_string(), Box::new(Literal::new(Value::Int(42))));
         // Body just returns the variable
-        let body = Box::new(VariableRef::new(
-            "x".to_string(),
-            Extent::Base(BaseType::Int),
-        ));
+        let body = Box::new(VarRef::new("x".to_string(), Extent::Base(BaseType::Int)));
         let mut lambda = Lambda::new(variable, body);
 
         // Subscribe to the lambda
@@ -1115,7 +1109,7 @@ mod tests {
     #[test]
     fn test_lambda_with_literal_body() {
         // Create a lambda: λ x . 10 (constant function)
-        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(0))));
+        let variable = Var::new("x".to_string(), Box::new(Literal::new(Value::Int(0))));
         let body = Box::new(Literal::new(Value::Int(10)));
         let mut lambda = Lambda::new(variable, body);
 
@@ -1148,11 +1142,8 @@ mod tests {
     #[test]
     fn test_lambda_release() {
         // Create a lambda: λ x . x
-        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(42))));
-        let body = Box::new(VariableRef::new(
-            "x".to_string(),
-            Extent::Base(BaseType::Int),
-        ));
+        let variable = Var::new("x".to_string(), Box::new(Literal::new(Value::Int(42))));
+        let body = Box::new(VarRef::new("x".to_string(), Extent::Base(BaseType::Int)));
         let mut lambda = Lambda::new(variable, body);
 
         // Subscribe to the lambda
@@ -1174,11 +1165,8 @@ mod tests {
     #[test]
     fn test_lambda_with_function_guard() {
         // Create a lambda: λ x . x
-        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(42))));
-        let body = Box::new(VariableRef::new(
-            "x".to_string(),
-            Extent::Base(BaseType::Int),
-        ));
+        let variable = Var::new("x".to_string(), Box::new(Literal::new(Value::Int(42))));
+        let body = Box::new(VarRef::new("x".to_string(), Extent::Base(BaseType::Int)));
         let mut lambda = Lambda::new(variable, body);
 
         // Subscribe with a function guard
@@ -1213,17 +1201,14 @@ mod tests {
     fn test_lambda_nested_scope() {
         // Test that lambda creates a new scope for its variable
         // Create: λ x . x where x is defined in the lambda
-        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(100))));
-        let body = Box::new(VariableRef::new(
-            "x".to_string(),
-            Extent::Base(BaseType::Int),
-        ));
+        let variable = Var::new("x".to_string(), Box::new(Literal::new(Value::Int(100))));
+        let body = Box::new(VarRef::new("x".to_string(), Extent::Base(BaseType::Int)));
         let mut lambda = Lambda::new(variable, body);
 
         // Create a parent scope with a different variable
         let mut parent_scope = VarScope::new();
         let parent_literal = Literal::new(Value::Int(200));
-        let mut parent_variable = Variable::new("x".to_string(), Box::new(parent_literal));
+        let mut parent_variable = Var::new("x".to_string(), Box::new(parent_literal));
         let (parent_consumer, _) = TestConsumer::new();
         let parent_subscription =
             parent_variable.subscribe_to_var(Guard::universal(), Box::new(parent_consumer), None);
@@ -1254,7 +1239,7 @@ mod tests {
     fn test_lambda_notifications_from_both_sources() {
         // Test that notifications work correctly when both variable and body notify
         // Create a lambda where both variable and body are literals (they notify immediately)
-        let variable = Variable::new("x".to_string(), Box::new(Literal::new(Value::Int(1))));
+        let variable = Var::new("x".to_string(), Box::new(Literal::new(Value::Int(1))));
         let body = Box::new(Literal::new(Value::Int(2)));
         let mut lambda = Lambda::new(variable, body);
 
