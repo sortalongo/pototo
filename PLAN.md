@@ -64,13 +64,14 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 - [x] `release()` with guard splitting and propagation
 - [x] Tests (identity, constant function, release, nested scope, function guards, notifications)
 
-## In Progress 🚧
+### Step 6: Columnar Values & Alignment ✅
+- [x] Implement `ColumnValue` struct with `values` and `parent_indices`
+- [x] Helper methods: `single()`, `from_values()`, `with_parent_indices()`, `expand()`
+- [x] Update `Producer::get()` to return `ColumnValue` instead of `Value`
+- [x] Update all existing producers (`LiteralProducer`, `VarSub`, `VarRefSub`, `LambdaProducer`)
+- [x] Update tests for columnar values
 
-### Step 6: Columnar Values & Alignment
-- [ ] Implement `ColumnValue` struct with `values` and `parent_indices`
-- [ ] Update `Producer::get()` to return `ColumnValue` instead of `Value`
-- [ ] Update all existing producers to return `ColumnValue`
-- [ ] Update tests for columnar values
+## In Progress 🚧
 
 ### Step 7: Variable Binding Modes
 - [ ] Refactor `Var` to remove static `definition` field
@@ -216,22 +217,20 @@ Scanning variables with predicates referencing outer variables execute as joins:
 - Release guards used for garbage collection
 
 ## Testing Status
-- [x] Literal tests (int, string)
-- [x] Basic variable test
-- [x] Lambda tests (extent, identity, constant, release, function guards, nested scope, notifications)
+- [x] Literal tests (int, string) - updated for ColumnValue
+- [x] Basic variable test - updated for ColumnValue
+- [x] Lambda tests (extent, identity, constant, release, function guards, nested scope, notifications) - updated for ColumnValue
 - [ ] Application tests
-- [ ] ColumnValue and alignment tests
+- [ ] ColumnValue alignment tests (expand, parent_indices)
 - [ ] Join execution tests
 - [ ] Integration tests
 
 ## Next Steps (Immediate)
-1. Implement `ColumnValue` struct and update `Producer::get()` return type
-2. Update all existing producers to return `ColumnValue`
-3. Refactor `Var` to remove static definition, add `VarSource` enum to `VarSub`
-4. Add `innermost_scan` tracking to `VarScope`
-5. Implement alignment logic in `VarRefSub::get()`
-6. Implement `Application` operator (binds argument to lambda variable)
-7. Implement basic Cartesian product join for scanning mode
+1. Refactor `Var` to remove static definition, add `VarSource` enum to `VarSub`
+2. Add `innermost_scan` tracking to `VarScope`
+3. Implement alignment logic in `VarRefSub::get()` using `ColumnValue::expand()`
+4. Implement `Application` operator (binds argument to lambda variable)
+5. Implement basic Cartesian product join for scanning mode
 
 ## Questions / Open Issues
 1. Should `Consumer::notify()` take `Guard` by reference instead of by value?

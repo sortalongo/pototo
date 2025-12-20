@@ -248,6 +248,81 @@ pub struct FuncBinding {
     pub output: Value,
 }
 
+/// A columnar value representation for vectorized execution.
+/// Contains a batch of values with optional alignment information.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnValue {
+    /// The batch of values
+    pub values: Vec<Value>,
+    /// Indices into the parent level's batch for alignment with outer scans.
+    /// None if this is the outermost level or independent.
+    pub parent_indices: Option<Vec<usize>>,
+}
+
+impl ColumnValue {
+    /// Create a new ColumnValue with a single value (no parent alignment).
+    pub fn single(value: Value) -> Self {
+        ColumnValue {
+            values: vec![value],
+            parent_indices: None,
+        }
+    }
+
+    /// Create a new ColumnValue from a vector of values (no parent alignment).
+    pub fn from_values(values: Vec<Value>) -> Self {
+        ColumnValue {
+            values,
+            parent_indices: None,
+        }
+    }
+
+    /// Create a new ColumnValue with parent alignment indices.
+    pub fn with_parent_indices(values: Vec<Value>, parent_indices: Vec<usize>) -> Self {
+        ColumnValue {
+            values,
+            parent_indices: Some(parent_indices),
+        }
+    }
+
+    /// Check if this column contains a single value.
+    pub fn is_single(&self) -> bool {
+        self.values.len() == 1
+    }
+
+    /// Get the single value if this column contains exactly one value.
+    pub fn as_single(&self) -> Option<&Value> {
+        if self.values.len() == 1 {
+            Some(&self.values[0])
+        } else {
+            None
+        }
+    }
+
+    /// Get the number of values in this column.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Check if this column is empty.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Expand this column's values using the given parent_indices.
+    /// Used when an outer variable needs to be aligned with an inner scan.
+    pub fn expand(&self, indices: &[usize]) -> ColumnValue {
+        let expanded_values: Vec<Value> = indices
+            .iter()
+            .map(|&i| self.values[i].clone())
+            .collect();
+        ColumnValue {
+            values: expanded_values,
+            // The expanded column inherits the indices as its own parent_indices
+            parent_indices: Some(indices.to_vec()),
+        }
+    }
+}
+
 // ============================================================================
 // Producer/Consumer Protocol
 // ============================================================================
@@ -286,10 +361,10 @@ where
 /// the consumer to retrieve data and release regions.
 pub trait Producer {
     /// Get the data that is ready.
-    /// Returns the data structure representing the values in the ready region.
+    /// Returns a columnar representation of the values in the ready region.
     /// The structure depends on the operator's type (records have fields,
     /// functions are collections, etc.).
-    fn get(&mut self) -> Value;
+    fn get(&mut self) -> ColumnValue;
 
     /// Release interest in a region.
     /// The `obsolete_guard` specifies a sub-region of the subscription that
@@ -301,7 +376,7 @@ pub trait Producer {
 
 /// Blanket implementation: Rc<RefCell<P>> implements Producer when P does.
 impl<P: Producer> Producer for Rc<RefCell<P>> {
-    fn get(&mut self) -> Value {
+    fn get(&mut self) -> ColumnValue {
         self.borrow_mut().get()
     }
 
@@ -414,8 +489,8 @@ struct LiteralProducer {
 }
 
 impl Producer for LiteralProducer {
-    fn get(&mut self) -> Value {
-        self.value.clone()
+    fn get(&mut self) -> ColumnValue {
+        ColumnValue::single(self.value.clone())
     }
 
     fn release(&mut self, obsolete_guard: Guard) -> Guard {
@@ -617,7 +692,7 @@ impl VarSub {
 }
 
 impl Producer for VarSub {
-    fn get(&mut self) -> Value {
+    fn get(&mut self) -> ColumnValue {
         self.definition_producer
             .as_mut()
             .expect("Definition producer should be set")
@@ -721,13 +796,14 @@ impl Consumer for VarRefSub {
 }
 
 impl Producer for VarRefSub {
-    fn get(&mut self) -> Value {
+    fn get(&mut self) -> ColumnValue {
         // Get data from variable subscription
-        let value = self.variable_subscription.borrow_mut().get();
+        let column = self.variable_subscription.borrow_mut().get();
 
         // TODO: Filter data based on intent guard
-        // For now, return the full value
-        value
+        // TODO: Handle alignment using innermost_scan's parent_indices
+        // For now, return the full column
+        column
     }
 
     fn release(&mut self, _obsolete_guard: Guard) -> Guard {
@@ -807,22 +883,32 @@ impl LambdaProducer {
 impl Producer for LambdaProducer {
     /// Get the function bindings by combining domain values from the variable
     /// and codomain values from the body.
-    fn get(&mut self) -> Value {
-        // Get domain values from variable
-        let domain_value = self.variable_subscription.borrow_mut().get();
+    fn get(&mut self) -> ColumnValue {
+        // Get domain values from variable (columnar)
+        let domain_column = self.variable_subscription.borrow_mut().get();
 
-        // Get codomain values from body
-        let codomain_value = self.body_producer.get();
+        // Get codomain values from body (columnar)
+        let codomain_column = self.body_producer.get();
 
-        // TODO: Properly combine domain and codomain into function bindings
-        // For now, this is a placeholder that assumes single values
-        // In practice, we need to handle collections and align them properly
-        let bindings = vec![FuncBinding {
-            input: domain_value,
-            output: codomain_value,
-        }];
+        // Combine domain and codomain into function bindings
+        // The domain and codomain columns should be aligned (same length)
+        // Each pair (domain[i], codomain[i]) forms a binding
+        let bindings: Vec<FuncBinding> = domain_column
+            .values
+            .iter()
+            .zip(codomain_column.values.iter())
+            .map(|(input, output)| FuncBinding {
+                input: input.clone(),
+                output: output.clone(),
+            })
+            .collect();
 
-        Value::Function(bindings)
+        // Return as a single Function value containing all bindings
+        // The parent_indices from the domain column are preserved for alignment
+        ColumnValue {
+            values: vec![Value::Function(bindings)],
+            parent_indices: domain_column.parent_indices,
+        }
     }
 
     /// Release interest in a region by splitting the obsolete guard and
@@ -986,9 +1072,11 @@ mod tests {
         assert_eq!(notifications_borrowed.len(), 1);
         assert_eq!(notifications_borrowed[0], Guard::universal());
 
-        // Verify get returns the constant value
-        let value = producer.get();
-        assert_eq!(value, Value::Int(42));
+        // Verify get returns the constant value (as a single-element column)
+        let column = producer.get();
+        assert_eq!(column.values.len(), 1);
+        assert_eq!(column.values[0], Value::Int(42));
+        assert!(column.parent_indices.is_none());
 
         // Verify release is a no-op
         let released = producer.release(Guard::universal());
@@ -1009,8 +1097,9 @@ mod tests {
         assert_eq!(notifications_borrowed.len(), 1);
         assert_eq!(notifications_borrowed[0], Guard::universal());
 
-        let value = producer.get();
-        assert_eq!(value, Value::String("hello".to_string()));
+        let column = producer.get();
+        assert_eq!(column.values.len(), 1);
+        assert_eq!(column.values[0], Value::String("hello".to_string()));
     }
 
     #[test]
@@ -1040,9 +1129,10 @@ mod tests {
         assert_eq!(notifications_borrowed.len(), 1);
         assert_eq!(notifications_borrowed[0], Guard::universal());
 
-        // Verify get returns the value
-        let value = producer.get();
-        assert_eq!(value, Value::Int(42));
+        // Verify get returns the value (as a single-element column)
+        let column = producer.get();
+        assert_eq!(column.values.len(), 1);
+        assert_eq!(column.values[0], Value::Int(42));
 
         // Verify release returns stored release guard (initially empty)
         let released = producer.release(Guard::universal());
@@ -1094,15 +1184,16 @@ mod tests {
             notifications_borrowed.len()
         );
 
-        // Get the function bindings
-        let value = producer.get();
-        match value {
+        // Get the function bindings (as a single-element column containing a Function value)
+        let column = producer.get();
+        assert_eq!(column.values.len(), 1);
+        match &column.values[0] {
             Value::Function(bindings) => {
                 assert_eq!(bindings.len(), 1);
                 assert_eq!(bindings[0].input, Value::Int(42));
                 assert_eq!(bindings[0].output, Value::Int(42));
             }
-            _ => panic!("Expected Function value, got {:?}", value),
+            _ => panic!("Expected Function value, got {:?}", column.values[0]),
         }
     }
 
@@ -1125,9 +1216,10 @@ mod tests {
             notifications_borrowed.len()
         );
 
-        // Get the function bindings
-        let value = producer.get();
-        match value {
+        // Get the function bindings (as a single-element column containing a Function value)
+        let column = producer.get();
+        assert_eq!(column.values.len(), 1);
+        match &column.values[0] {
             Value::Function(bindings) => {
                 assert_eq!(bindings.len(), 1);
                 // Input is from variable (literal 0)
@@ -1135,7 +1227,7 @@ mod tests {
                 // Output is from body (literal 10)
                 assert_eq!(bindings[0].output, Value::Int(10));
             }
-            _ => panic!("Expected Function value, got {:?}", value),
+            _ => panic!("Expected Function value, got {:?}", column.values[0]),
         }
     }
 
@@ -1188,8 +1280,9 @@ mod tests {
         );
 
         // Get should work
-        let value = producer.get();
-        match value {
+        let column = producer.get();
+        assert_eq!(column.values.len(), 1);
+        match &column.values[0] {
             Value::Function(bindings) => {
                 assert!(!bindings.is_empty());
             }
@@ -1222,8 +1315,9 @@ mod tests {
             lambda.subscribe(Guard::universal(), Box::new(consumer), Some(parent_scope));
 
         // Get the value - should use lambda's variable (100), not parent's (200)
-        let value = producer.get();
-        match value {
+        let column = producer.get();
+        assert_eq!(column.values.len(), 1);
+        match &column.values[0] {
             Value::Function(bindings) => {
                 assert_eq!(bindings.len(), 1);
                 // The input should be from the lambda's variable definition
