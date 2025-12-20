@@ -56,115 +56,98 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 - [x] `VarScope` for variable lookup with parent chaining
 - [x] Basic variable test
 
+### Step 5: Lambda Operator ✅
+- [x] `Lambda` struct with variable and body
+- [x] `extent()` implementation (computes function type from domain/codomain)
+- [x] `subscribe()` implementation with domain/codomain guard splitting
+- [x] `LambdaProducer` with proper notification handling from both variable and body
+- [x] `release()` with guard splitting and propagation
+- [x] Tests (identity, constant function, release, nested scope, function guards, notifications)
+
 ## In Progress 🚧
 
-### Step 5: Lambda Operator
-- [x] `Lambda` struct with variable and body
-- [x] Basic `subscribe()` implementation
-- [ ] `extent()` implementation (needs to compute function type from domain/codomain)
-- [ ] Proper handling of domain/codomain guards
-- [ ] Tests
+### Step 6: Columnar Values & Alignment
+- [ ] Implement `ColumnValue` struct with `values` and `parent_indices`
+- [ ] Update `Producer::get()` to return `ColumnValue` instead of `Value`
+- [ ] Update all existing producers to return `ColumnValue`
+- [ ] Update tests for columnar values
 
-### Step 6: Application Operator
+### Step 7: Variable Binding Modes
+- [ ] Refactor `Var` to remove static `definition` field
+- [ ] Add `VarSource` enum to `VarSub` (Bound vs Scanning modes)
+- [ ] Add `innermost_scan` tracking to `VarScope`
+- [ ] Implement alignment logic in `VarRefSub::get()`
+
+### Step 8: Application Operator
 - [ ] `Application` operator implementation
+- [ ] Binds argument to lambda's variable (sets Bound mode)
 - [ ] Bidirectional release flow (domain and codomain guards)
 - [ ] Depends-image generation for codomain intent guard
 - [ ] Tests
 
 ## TODO 📋
 
-### High Priority - Columnar Values & Alignment
-1. **Implement ColumnValue**
-   - Replace scalar `Value` with columnar `ColumnValue` representation
-   - Add `parent_indices: Option<Vec<usize>>` for alignment tracking
-   - Update `Producer::get()` to return `ColumnValue`
-
-2. **Refactor Var to remove static definition**
-   - Remove `definition` field from `Var` operator
-   - Binding happens dynamically via Application or remains unbound for scans
-
-3. **Implement VarSource enum in VarSub**
-   - `Bound(Box<dyn Producer>)` - wraps producer from Application
-   - `Scanning { extent, predicate, correlations }` - iterates over extent
-   - VarSub uses appropriate source based on how lambda is used
-
-4. **Implement alignment in VarRefSub**
-   - Track `innermost_scan: Option<Rc<RefCell<VarSub>>>`
-   - On `get()`: if referencing outer variable, expand using inner scan's `parent_indices`
-   - Enables vectorized operations on aligned batches
-
-5. **Extend VarScope to track innermost scan**
-   - Add `innermost_scan` field to VarScope
-   - Lambda sets this when its variable is scanning
-   - VarRef lookups receive alignment context
-
 ### High Priority - Core Operators
-6. **Implement Application operator**
-   - Binds argument to lambda's variable (sets to Bound mode)
-   - Handle function application with proper guard propagation
-   - Implement bidirectional release flow as specified in design doc
-
-7. **Complete Lambda::extent()**
-   - Compute function extent from variable extent (domain) and body extent (codomain)
-   - Store it in Lambda struct to avoid recomputation
-
-### Medium Priority - Joins
 8. **Implement Cartesian product join**
    - Default when scanning variable has no correlation predicate
    - Generate `parent_indices` for cross-product pattern
 
-9. **Implement hash join**
-   - When predicate is equality on outer variable (e.g., `t2.fk = t1.pk`)
-   - Build hash table on outer variable values
-   - Probe with inner variable, emit matching pairs with `parent_indices`
-
-10. **Implement JoinStrategy selection**
-    - Parse predicate to identify correlations with outer variables
-    - Choose appropriate join strategy (Cartesian, Hash, etc.)
-
-### Medium Priority - Other Operators
-11. **Records operator**
-    - Split guards for field subscriptions
-    - Zip data from fields (now columnar)
-    - Handle alignment when some fields ready but others aren't
-
-12. **Let-bindings**
-    - Existentially quantified variables (always bound)
-    - Scope management
-
-13. **Aggregation operators (sum, count, etc.)**
-    - Consume lambda in scanning mode
-    - Aggregate columnar values respecting `parent_indices` grouping
-
-### Low Priority / Future
-14. **Pattern matching**
-    - Union handling
-    - Case analysis
-
-15. **Memo operator**
+9. **Memo operator**
     - Cache function bindings
     - Yield guard tracking
     - Obsolete guard management
 
-16. **Dependent records**
+10. **Integration tests**
+    - Implement test-data operator.
+    - Write tests that wire up operators and test the flow of data through them.
+
+11. **Implement hash join**
+   - When predicate is equality on outer variable (e.g., `t2.fk = t1.pk`)
+   - Build hash table on outer variable values
+   - Probe with inner variable, emit matching pairs with `parent_indices`
+
+12. **Implement JoinStrategy selection**
+    - Parse predicate to identify correlations with outer variables
+    - Choose appropriate join strategy (Cartesian, Hash, etc.)
+
+### Medium Priority - Other Operators
+13. **Records operator**
+    - Split guards for field subscriptions
+    - Zip data from fields (now columnar)
+    - Handle alignment when some fields ready but others aren't
+
+14. **Let-bindings**
+    - Existentially quantified variables (always bound)
+    - Scope management
+
+15. **Aggregation operators (sum, count, etc.)**
+    - Consume lambda in scanning mode
+    - Aggregate columnar values respecting `parent_indices` grouping
+
+### Low Priority / Future
+16. **Pattern matching**
+    - Union handling
+    - Case analysis
+
+17. **Dependent records**
     - Type-level dependencies
 
-17. **Cycle handling**
+18. **Cycle handling**
     - Ensure termination in cyclic dataflow graphs
     - Convergence guarantees
 
 ### Deferred Challenges ⏳
-18. **Streaming joins**
+19. **Streaming joins**
     - Incremental join execution as yield guards advance
     - Symmetric hash join or similar for true streaming
     - See design.md "Open Challenges" section
 
-19. **Guard expression evaluation**
+20. **Guard expression evaluation**
     - How to evaluate complex expressions in guards (e.g., `t2.fk = t1.pk + 1`)
     - Requires dataflow machinery, but guards configure dataflow - circular dependency
     - See design.md "Open Challenges" section
 
-20. **Multi-level nesting optimization**
+21. **Multi-level nesting optimization**
     - Efficient composition of parent_indices through multiple levels
     - Precompute transitive indices vs. recompute on demand
 
@@ -235,7 +218,7 @@ Scanning variables with predicates referencing outer variables execute as joins:
 ## Testing Status
 - [x] Literal tests (int, string)
 - [x] Basic variable test
-- [ ] Lambda tests
+- [x] Lambda tests (extent, identity, constant, release, function guards, nested scope, notifications)
 - [ ] Application tests
 - [ ] ColumnValue and alignment tests
 - [ ] Join execution tests
@@ -243,11 +226,12 @@ Scanning variables with predicates referencing outer variables execute as joins:
 
 ## Next Steps (Immediate)
 1. Implement `ColumnValue` struct and update `Producer::get()` return type
-2. Refactor `Var` to remove static definition, add `VarSource` enum to `VarSub`
-3. Add `innermost_scan` tracking to `VarScope`
-4. Implement alignment logic in `VarRefSub::get()`
-5. Implement `Application` operator (binds argument to lambda variable)
-6. Implement basic Cartesian product join for scanning mode
+2. Update all existing producers to return `ColumnValue`
+3. Refactor `Var` to remove static definition, add `VarSource` enum to `VarSub`
+4. Add `innermost_scan` tracking to `VarScope`
+5. Implement alignment logic in `VarRefSub::get()`
+6. Implement `Application` operator (binds argument to lambda variable)
+7. Implement basic Cartesian product join for scanning mode
 
 ## Questions / Open Issues
 1. Should `Consumer::notify()` take `Guard` by reference instead of by value?
