@@ -594,6 +594,11 @@ impl Var {
         &self.name
     }
 
+    /// Get the extent (type) of this variable.
+    pub fn extent(&self) -> &Extent {
+        &self.extent
+    }
+
     /// Set a predicate that restricts this variable's extent.
     /// The predicate is applied to guards before propagating to the operator.
     /// Use `Guard::Universal` to remove the predicate (no restriction).
@@ -602,14 +607,14 @@ impl Var {
     }
 
     /// Create a VarSub for this variable with the given source.
-    /// This is the core method for creating variable subscriptions.
     ///
     /// For Bound mode: The yield_guard should be provided to indicate readiness.
     /// For Scanning mode: The subscription starts with an empty yield guard.
+    ///
+    /// Consumers can be added later via `VarSub::add_consumer()`.
     pub fn create_subscription(
         &self,
         source: VarSource,
-        consumer: Box<dyn Consumer>,
         yield_guard: Option<Guard>,
     ) -> Rc<RefCell<VarSub>> {
         let subscription = Rc::new(RefCell::new(VarSub::new(source)));
@@ -619,27 +624,13 @@ impl Var {
             subscription.borrow_mut().yield_guard = guard;
         }
 
-        subscription.borrow_mut().add_consumer(consumer);
         subscription
     }
 }
 
-impl Operator for Var {
-    fn extent(&self) -> &Extent {
-        &self.extent
-    }
-
-    fn subscribe(
-        &mut self,
-        _intent_guard: Guard,
-        _consumer: Box<dyn Consumer>,
-        _var_scope: Option<VarScope>,
-    ) -> Box<dyn Producer> {
-        // Var::subscribe should not be called directly - use Lambda or Application
-        // to properly set up the variable binding.
-        panic!("Var::subscribe should not be called directly. Use Lambda::subscribe_with_binding or Application.");
-    }
-}
+// Note: Var does not implement Operator because it cannot be subscribed to directly.
+// Variables are always managed by their enclosing context (Lambda, Let, etc.) which
+// creates the VarSub with the appropriate VarSource (Bound or Scanning).
 
 /// VarSub implements both Producer and Consumer.
 /// It stores the yield guard (monotonically growing) and forwards notifications to all consumers.
@@ -727,6 +718,7 @@ impl Producer for VarSub {
             VarSource::Bound(producer) => producer.release(obsolete_guard),
             VarSource::Scanning { .. } => {
                 // For scanning, just return the obsolete guard unchanged
+                // TODO: Once we support scanning over data-defined extents, propagate releases into it.
                 obsolete_guard
             }
         }
@@ -856,8 +848,8 @@ pub struct Lambda {
 struct LambdaProducer {
     /// Reference to the variable subscription (for domain values)
     variable_subscription: Rc<RefCell<VarSub>>,
-    /// The body producer (for codomain values)
-    body_producer: Box<dyn Producer>,
+    /// The body producer (for codomain values). Set after body subscription.
+    body_producer: Option<Box<dyn Producer>>,
     /// The downstream consumer that will receive notifications
     downstream_consumer: Box<dyn Consumer>,
     /// Yield guard from the variable (domain)
@@ -869,21 +861,25 @@ struct LambdaProducer {
 }
 
 impl LambdaProducer {
-    /// Create a new LambdaProducer.
+    /// Create a new LambdaProducer. The body_producer should be set via set_body_producer().
     fn new(
         variable_subscription: Rc<RefCell<VarSub>>,
-        body_producer: Box<dyn Producer>,
         downstream_consumer: Box<dyn Consumer>,
         intent_guard: Guard,
     ) -> Self {
         LambdaProducer {
             variable_subscription,
-            body_producer,
+            body_producer: None,
             downstream_consumer,
             variable_yield_guard: Guard::Empty,
             body_yield_guard: Guard::Empty,
             intent_guard,
         }
+    }
+
+    /// Set the body producer after creation.
+    fn set_body_producer(&mut self, producer: Box<dyn Producer>) {
+        self.body_producer = Some(producer);
     }
 
     /// Check if both variable and body have yielded data, and notify downstream if so.
@@ -911,7 +907,11 @@ impl Producer for LambdaProducer {
         let domain_column = self.variable_subscription.borrow_mut().get();
 
         // Get codomain values from body (columnar)
-        let codomain_column = self.body_producer.get();
+        let codomain_column = self
+            .body_producer
+            .as_mut()
+            .expect("body_producer should be set before get()")
+            .get();
 
         // Combine domain and codomain into function bindings
         // The domain and codomain columns should be aligned (same length)
@@ -949,7 +949,11 @@ impl Producer for LambdaProducer {
             .release(domain_obsolete);
 
         // Release the body (codomain)
-        let expanded_codomain_obsolete = self.body_producer.release(codomain_obsolete);
+        let expanded_codomain_obsolete = self
+            .body_producer
+            .as_mut()
+            .expect("body_producer should be set before release()")
+            .release(codomain_obsolete);
 
         // Combine the expanded guards back into a function guard
         Guard::from_independent_function_parts(expanded_domain_obsolete, expanded_codomain_obsolete)
@@ -1011,7 +1015,11 @@ impl Lambda {
         let (var_source, var_yield_guard) = match binding {
             Some(producer) => (
                 VarSource::Bound(producer),
-                Some(Guard::Universal), // Bound producers are immediately ready
+                // TODO: For now, bound producers are ready when created because the upstream operator's
+                // subscribe() calls notify() before returning. This assumption holds for
+                // all current operators. When we add lazy/async operators, we'll need to
+                // thread the yield guard through the binding.
+                Some(Guard::Universal),
             ),
             None => (
                 VarSource::Scanning {
@@ -1022,23 +1030,19 @@ impl Lambda {
             ),
         };
 
-        // Create placeholder VarSub for LambdaProducer initialization
-        let placeholder_source = VarSource::Scanning {
-            extent: Extent::Base(BaseType::Unit),
-            predicate: Guard::Empty,
-        };
+        // Create the variable subscription first (without consumer yet)
+        let variable_subscription = self
+            .variable
+            .create_subscription(var_source, var_yield_guard);
 
-        // Create LambdaProducer first (wrapped in Rc<RefCell<>>) so we can capture it in closures
+        // Create LambdaProducer with the real variable subscription (body_producer set later)
         let lambda_producer = Rc::new(RefCell::new(LambdaProducer::new(
-            // Placeholder - will be set after creating variable subscription
-            Rc::new(RefCell::new(VarSub::new(placeholder_source))),
-            // Placeholder - will be set after subscribing to body
-            Box::new(LiteralProducer { value: Value::Unit }),
+            variable_subscription.clone(),
             consumer,
             intent_guard.clone(),
         )));
 
-        // Create closure for variable notifications: updates variable_yield_guard and checks if ready
+        // Now create the variable consumer closure that captures LambdaProducer
         let lambda_producer_for_var = lambda_producer.clone();
         let variable_consumer: Box<dyn Consumer> = Box::new(move |yield_guard: Guard| {
             let mut producer = lambda_producer_for_var.borrow_mut();
@@ -1046,13 +1050,11 @@ impl Lambda {
             producer.check_and_notify();
         });
 
-        // Create the variable subscription with the appropriate source
-        let variable_subscription =
-            self.variable
-                .create_subscription(var_source, variable_consumer, var_yield_guard);
-
-        // Update LambdaProducer with the actual variable subscription
-        lambda_producer.borrow_mut().variable_subscription = variable_subscription.clone();
+        // Add the consumer to the variable subscription
+        // (add_consumer handles the case where data is already ready)
+        variable_subscription
+            .borrow_mut()
+            .add_consumer(variable_consumer);
 
         new_scope.add_variable(self.variable.name.clone(), variable_subscription);
 
@@ -1069,8 +1071,10 @@ impl Lambda {
             .body
             .subscribe(codomain_guard, body_consumer, Some(new_scope));
 
-        // Update the LambdaProducer with the actual body producer
-        lambda_producer.borrow_mut().body_producer = body_producer;
+        // Set the body producer
+        lambda_producer
+            .borrow_mut()
+            .set_body_producer(body_producer);
 
         // Return the LambdaProducer as a Producer
         Box::new(lambda_producer)
@@ -1193,10 +1197,8 @@ mod tests {
 
         // Create a VarScope with the variable bound to the literal
         let mut var_scope = VarScope::new();
-        let (var_consumer, _) = TestConsumer::new();
         let var_subscription = variable.create_subscription(
             VarSource::Bound(binding_producer),
-            Box::new(var_consumer),
             Some(Guard::Universal), // Bound producer is immediately ready
         );
         var_scope.add_variable("x".to_string(), var_subscription);
@@ -1421,10 +1423,8 @@ mod tests {
         let (parent_binding_consumer, _) = TestConsumer::new();
         let parent_binding =
             parent_literal.subscribe(Guard::universal(), Box::new(parent_binding_consumer), None);
-        let (parent_consumer, _) = TestConsumer::new();
         let parent_subscription = parent_variable.create_subscription(
             VarSource::Bound(parent_binding),
-            Box::new(parent_consumer),
             Some(Guard::Universal), // Bound producer is immediately ready
         );
         parent_scope.add_variable("x".to_string(), parent_subscription);

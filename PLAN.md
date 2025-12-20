@@ -79,6 +79,7 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 - [x] Update `Var::create_subscription()` with yield_guard parameter
 - [x] Update Lambda with `subscribe_with_binding()` for Bound mode
 - [x] Update tests for new API
+- [x] Fix up TODOs left by review (removed dead Operator impl, eliminated placeholder VarSub, clarified yield_guard)
 - [ ] Add `innermost_scan` tracking to `VarScope`
 - [ ] Implement alignment logic in `VarRefSub::get()`
 
