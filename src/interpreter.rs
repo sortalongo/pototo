@@ -311,10 +311,7 @@ impl ColumnValue {
     /// Expand this column's values using the given parent_indices.
     /// Used when an outer variable needs to be aligned with an inner scan.
     pub fn expand(&self, indices: &[usize]) -> ColumnValue {
-        let expanded_values: Vec<Value> = indices
-            .iter()
-            .map(|&i| self.values[i].clone())
-            .collect();
+        let expanded_values: Vec<Value> = indices.iter().map(|&i| self.values[i].clone()).collect();
         ColumnValue {
             values: expanded_values,
             // The expanded column inherits the indices as its own parent_indices
@@ -884,7 +881,7 @@ impl Producer for LambdaProducer {
     /// Get the function bindings by combining domain values from the variable
     /// and codomain values from the body.
     fn get(&mut self) -> ColumnValue {
-        // Get domain values from variable (columnar)
+        // Get domain values from variable
         let domain_column = self.variable_subscription.borrow_mut().get();
 
         // Get codomain values from body (columnar)
