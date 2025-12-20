@@ -74,8 +74,11 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 ## In Progress 🚧
 
 ### Step 7: Variable Binding Modes
-- [ ] Refactor `Var` to remove static `definition` field
-- [ ] Add `VarSource` enum to `VarSub` (Bound vs Scanning modes)
+- [x] Refactor `Var` to remove static `definition` field
+- [x] Add `VarSource` enum to `VarSub` (Bound vs Scanning modes)
+- [x] Update `Var::create_subscription()` with yield_guard parameter
+- [x] Update Lambda with `subscribe_with_binding()` for Bound mode
+- [x] Update tests for new API
 - [ ] Add `innermost_scan` tracking to `VarScope`
 - [ ] Implement alignment logic in `VarRefSub::get()`
 
