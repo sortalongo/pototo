@@ -249,57 +249,81 @@ For `sum(\t1. sum(\t2 where t2.fk = t1.pk. v(t1) + v(t2)))`:
 
 5. **v(t1) + v(t2)** operates on aligned batches of length 4
 
-### VarScope: Tracking Scan Chain for Multi-Level Alignment
+### VarScope: Using Parent Chain for Multi-Level Alignment
 
-`VarScope` tracks the full chain of scanning variables for proper alignment across any nesting depth.
+Each `VarScope` contains exactly one variable (the lambda's bound variable). The parent scope
+chain serves as the natural scan chain - no separate tracking needed.
 
-**Problem with simple "innermost_scan" approach:**
+**Problem:**
 ```
 sum(\t1. sum(\t2. sum(\t3. v(t1) + v(t2) + v(t3))))
 ```
 When referencing `v(t1)` from t3's context:
 - t3's parent_indices = [0,0,1,1,2,2] (maps to t2)
 - t2's parent_indices = [0,0,1] (maps to t1)
-- t1's parent_indices = None
+- Must compose: `[0,0,0,0,1,1]` by chaining through t2.
 
-Simple expansion using only t3's parent_indices gives wrong alignment.
-Must compose: `[0,0,0,0,1,1]` by chaining through t2.
-
-**Design:**
-
-`VarScope` maintains:
+**Simplified VarScope:**
 ```rust
-scan_chain: Vec<Rc<RefCell<VarSub>>>  // Ordered from outermost to innermost
+pub struct VarScope {
+    parent: Option<Box<VarScope>>,
+    name: String,                        // Single variable name
+    subscription: Rc<RefCell<VarSub>>,   // Single variable subscription
+}
 ```
 
-`VarSub` in scanning mode knows its depth:
+**lookup_variable() walks parent chain:**
 ```rust
-scan_depth: Option<usize>  // None for bound, Some(n) for scanning
+/// Returns (found_subscription, inner_scans) where inner_scans is the chain
+/// of scanning variables between current scope and the found variable.
+pub fn lookup_variable(&self, name: &str) -> Option<(Rc<RefCell<VarSub>>, Vec<Rc<RefCell<VarSub>>>)> {
+    self.lookup_with_chain(name, Vec::new())
+}
+
+fn lookup_with_chain(&self, name: &str, mut chain: Vec<Rc<RefCell<VarSub>>>) 
+    -> Option<(Rc<RefCell<VarSub>>, Vec<Rc<RefCell<VarSub>>>)> {
+    if self.name == name {
+        Some((self.subscription.clone(), chain))
+    } else {
+        // If this scope's variable is scanning, add it to the chain
+        if self.subscription.borrow().is_scanning() {
+            chain.push(self.subscription.clone());
+        }
+        self.parent.as_ref()?.lookup_with_chain(name, chain)
+    }
+}
 ```
 
-When Lambda creates a child scope:
-- If variable is scanning, `add_scanning_variable()` pushes to chain and sets depth
-- Child scope inherits parent's scan_chain
+**VarRefSub::get() composes parent_indices:**
+```rust
+fn compose_indices(outer: &[usize], inner: &[usize]) -> Vec<usize> {
+    inner.iter().map(|&i| outer[i]).collect()
+}
 
-When `VarRef::subscribe()` looks up a variable:
-- Gets the variable's scan_depth (if scanning) or None (if bound)
-- Gets the scan chain slice from that depth+1 to end (all inner scans)
-- `VarRefSub` stores this slice for alignment
-
-When `VarRefSub::get()` returns data:
-- If no scan chain slice, return column directly
-- Otherwise, compose parent_indices through the chain:
-  ```rust
-  fn compose_indices(outer: &[usize], inner: &[usize]) -> Vec<usize> {
-      inner.iter().map(|&i| outer[i]).collect()
-  }
-  
-  let mut indices = innermost.parent_indices.clone();
-  for scan in chain.iter().rev().skip(1) {  // Walk from inner to outer
-      indices = compose_indices(&scan.parent_indices, &indices);
-  }
-  column.expand(&indices)
-  ```
+fn get(&mut self) -> ColumnValue {
+    let column = self.variable_subscription.borrow_mut().get();
+    
+    if self.scan_chain.is_empty() {
+        return column;
+    }
+    
+    // Compose parent_indices from innermost to outermost
+    let mut indices: Option<Vec<usize>> = None;
+    for scan in self.scan_chain.iter().rev() {  // innermost first
+        if let Some(parent_indices) = scan.borrow_mut().get().parent_indices {
+            indices = Some(match indices {
+                None => parent_indices,
+                Some(inner) => compose_indices(&parent_indices, &inner),
+            });
+        }
+    }
+    
+    match indices {
+        Some(idx) => column.expand(&idx),
+        None => column,
+    }
+}
+```
 
 ## Records
 A record is a map of field names to field definitions. Each field's definition is a dataflow operator. Subscribe splits the provided guard into a guard for each field, and calls subscribe on each corresponding field's operator. Notify is called by each field's operator when ready. Get zips together the data for the record's fields (TODO: how do we handle alignment when some fields of a record are ready, but others aren't? Maybe we only return when all subscribed fields are available). Release splits the obsolete guard and propagates the subguards to each field (TODO: how to handle correlated guards?).

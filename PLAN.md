@@ -82,8 +82,7 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 - [x] Fix up TODOs left by review (removed dead Operator impl, eliminated placeholder VarSub, clarified yield_guard)
 
 ### Step 7b: Scan Chain & Multi-Level Alignment
-The original "innermost_scan" approach only handles 2 nesting levels. For 3+ nested scans,
-we need to compose parent_indices through all intermediate levels.
+For 3+ nested scans, we need to compose parent_indices through all intermediate levels.
 
 **Problem Example:**
 ```
@@ -93,24 +92,19 @@ When referencing `v(t1)` from t3's context:
 - t3's parent_indices point to t2 (not t1)
 - Must compose: t3→t2→t1 to get correct alignment
 
-**Design:**
-1. `VarScope` tracks full scan chain: `Vec<Rc<RefCell<VarSub>>>`
-2. Each VarSub in scanning mode knows its depth in the chain
-3. When `add_scanning_variable()` is called, push to the scan chain
-4. `VarRefSub` stores the scan chain slice from referenced variable's depth to innermost
-5. `VarRefSub::get()` composes parent_indices through the chain:
-   ```
-   fn compose_indices(outer: &[usize], inner: &[usize]) -> Vec<usize> {
-       inner.iter().map(|&i| outer[i]).collect()
-   }
-   ```
+**Design (simplified):**
+Each VarScope contains exactly one variable (the lambda's bound variable).
+Use the parent scope chain directly instead of a separate scan_chain.
+
+1. Simplify `VarScope`: replace HashMap with single `name: String` + `subscription: Rc<RefCell<VarSub>>`
+2. `lookup_variable()` walks parent chain, collecting scanning VarSubs along the way
+3. Returns both the found variable AND the chain of inner scans (for alignment)
+4. `VarRefSub` stores the scan chain and composes parent_indices in `get()`
 
 **Implementation Steps:**
-- [ ] Add `scan_chain: Vec<Rc<RefCell<VarSub>>>` to `VarScope`
-- [ ] Add `scan_depth: Option<usize>` to `VarSub` (None for bound, Some(n) for scanning at depth n)
-- [ ] `add_scanning_variable()` pushes to chain and sets depth
-- [ ] `lookup_variable()` returns variable + relevant scan chain slice
-- [ ] `VarRefSub` stores scan chain slice for alignment
+- [ ] Refactor `VarScope` to store single variable (name + subscription) instead of HashMap
+- [ ] Update `lookup_variable()` to return `(VarSub, Vec<Rc<RefCell<VarSub>>>)` - variable + inner scans
+- [ ] `VarRefSub` stores scan chain for alignment
 - [ ] `VarRefSub::get()` composes parent_indices through chain
 - [ ] Tests for 2-level and 3-level nested scans
 
