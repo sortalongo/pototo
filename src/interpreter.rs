@@ -504,45 +504,58 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Variable scope for looking up variables.
+/// Each scope contains exactly one variable (the lambda's bound variable).
 /// Variables are looked up by name, searching up the parent chain if not found.
 pub struct VarScope {
     /// Optional parent scope (for nested scopes)
     parent: Option<Box<VarScope>>,
-    /// Map of variable names to their subscriptions (shared state)
-    variables: HashMap<String, Rc<RefCell<VarSub>>>,
+    /// The variable name in this scope
+    name: String,
+    /// The variable subscription in this scope
+    subscription: Rc<RefCell<VarSub>>,
 }
 
 impl VarScope {
-    /// Create a new empty scope.
-    pub fn new() -> Self {
+    /// Create a new root scope with a single variable.
+    pub fn new(name: String, subscription: Rc<RefCell<VarSub>>) -> Self {
         VarScope {
             parent: None,
-            variables: HashMap::new(),
+            name,
+            subscription,
         }
     }
 
-    /// Create a new scope with a parent.
-    pub fn with_parent(parent: VarScope) -> Self {
+    /// Create a child scope with a parent.
+    pub fn child(parent: VarScope, name: String, subscription: Rc<RefCell<VarSub>>) -> Self {
         VarScope {
             parent: Some(Box::new(parent)),
-            variables: HashMap::new(),
+            name,
+            subscription,
         }
-    }
-
-    /// Add a variable to this scope.
-    pub fn add_variable(&mut self, name: String, subscription: Rc<RefCell<VarSub>>) {
-        self.variables.insert(name, subscription);
     }
 
     /// Look up a variable by name, searching up the parent chain.
-    /// Returns a reference to the subscription if found.
-    pub fn lookup_variable(&self, name: &str) -> Option<&Rc<RefCell<VarSub>>> {
-        if let Some(subscription) = self.variables.get(name) {
-            Some(subscription)
-        } else if let Some(ref parent) = self.parent {
-            parent.lookup_variable(name)
+    /// Returns (subscription, scan_chain) where scan_chain contains any scanning
+    /// variables between the current scope and the found variable (for alignment).
+    pub fn lookup_variable(&self, name: &str) -> Option<(Rc<RefCell<VarSub>>, Vec<Rc<RefCell<VarSub>>>)> {
+        self.lookup_with_chain(name, Vec::new())
+    }
+
+    fn lookup_with_chain(
+        &self,
+        name: &str,
+        mut chain: Vec<Rc<RefCell<VarSub>>>,
+    ) -> Option<(Rc<RefCell<VarSub>>, Vec<Rc<RefCell<VarSub>>>)> {
+        if self.name == name {
+            // Found the variable - return it with the chain of inner scans
+            Some((self.subscription.clone(), chain))
         } else {
-            None
+            // If this scope's variable is scanning, add it to the chain
+            if self.subscription.borrow().is_scanning() {
+                chain.push(self.subscription.clone());
+            }
+            // Continue searching in parent
+            self.parent.as_ref()?.lookup_with_chain(name, chain)
         }
     }
 }
@@ -776,14 +789,14 @@ impl Operator for VarRef {
     ) -> Box<dyn Producer> {
         // Look up the variable in the scope
         let var_scope = var_scope.expect("VarRef requires a VarScope");
-        let variable_subscription = var_scope
+        let (variable_subscription, scan_chain) = var_scope
             .lookup_variable(&self.name)
-            .expect(&format!("Variable '{}' not found in scope", self.name))
-            .clone();
+            .expect(&format!("Variable '{}' not found in scope", self.name));
 
-        // Create VarRefSub with the consumer stored
+        // Create VarRefSub with the consumer and scan chain for alignment
         let ref_subscription = Rc::new(RefCell::new(VarRefSub {
             variable_subscription: variable_subscription.clone(),
+            scan_chain,
             intent_guard,
             consumer,
         }));
@@ -805,6 +818,8 @@ impl Operator for VarRef {
 struct VarRefSub {
     /// Reference to the VarSub
     variable_subscription: Rc<RefCell<VarSub>>,
+    /// Chain of scanning variables between current scope and referenced variable (for alignment)
+    scan_chain: Vec<Rc<RefCell<VarSub>>>,
     /// The intent guard for this subscription
     intent_guard: Guard,
     /// The consumer of the variable ref that will receive filtered notifications
@@ -819,15 +834,43 @@ impl Consumer for VarRefSub {
     }
 }
 
+/// Compose parent indices: maps inner indices through outer indices.
+/// For inner[i], result[i] = outer[inner[i]]
+fn compose_indices(outer: &[usize], inner: &[usize]) -> Vec<usize> {
+    inner.iter().map(|&i| outer[i]).collect()
+}
+
 impl Producer for VarRefSub {
     fn get(&mut self) -> ColumnValue {
         // Get data from variable subscription
         let column = self.variable_subscription.borrow_mut().get();
 
         // TODO: Filter data based on intent guard
-        // TODO: Handle alignment using innermost_scan's parent_indices
-        // For now, return the full column
-        column
+
+        // If no scan chain, no alignment needed
+        if self.scan_chain.is_empty() {
+            return column;
+        }
+
+        // Compose parent_indices from innermost scan to outermost
+        // The chain is ordered from innermost (first after current scope) to outermost (closest to variable)
+        let mut composed_indices: Option<Vec<usize>> = None;
+        for scan in self.scan_chain.iter().rev() {
+            // Get this scan's parent_indices
+            let scan_column = scan.borrow_mut().get();
+            if let Some(parent_indices) = scan_column.parent_indices {
+                composed_indices = Some(match composed_indices {
+                    None => parent_indices,
+                    Some(inner) => compose_indices(&parent_indices, &inner),
+                });
+            }
+        }
+
+        // Expand column using composed indices
+        match composed_indices {
+            Some(indices) => column.expand(&indices),
+            None => column,
+        }
     }
 
     fn release(&mut self, _obsolete_guard: Guard) -> Guard {
@@ -1013,13 +1056,6 @@ impl Lambda {
             .split_function()
             .unwrap_or((Guard::universal(), Guard::universal()));
 
-        // Create a new VarScope first (before subscribing, since subscribe consumes var_scope)
-        let mut new_scope = if let Some(parent) = var_scope {
-            VarScope::with_parent(parent)
-        } else {
-            VarScope::new()
-        };
-
         // For Bound mode: subscribe to the binding operator with VarSub as consumer
         // This ensures VarSub receives notifications and can forward to its consumers
         let variable_subscription = if let Some(binding_op) = binding {
@@ -1067,7 +1103,12 @@ impl Lambda {
             .borrow_mut()
             .add_consumer(variable_consumer);
 
-        new_scope.add_variable(self.variable.name.clone(), variable_subscription);
+        // Create a new VarScope with this variable
+        let new_scope = if let Some(parent) = var_scope {
+            VarScope::child(parent, self.variable.name.clone(), variable_subscription)
+        } else {
+            VarScope::new(self.variable.name.clone(), variable_subscription)
+        };
 
         // Create closure for body notifications: updates body_yield_guard and checks if ready
         let lambda_producer_for_body = lambda_producer.clone();
@@ -1216,8 +1257,7 @@ mod tests {
             .set_source(VarSource::Bound(binding_producer));
 
         // Create a VarScope with the variable
-        let mut var_scope = VarScope::new();
-        var_scope.add_variable("x".to_string(), var_subscription);
+        let var_scope = VarScope::new("x".to_string(), var_subscription);
 
         // Subscribe and verify it works
         let (consumer, notifications) = TestConsumer::new();
@@ -1419,7 +1459,6 @@ mod tests {
         let mut lambda = Lambda::new(variable, body);
 
         // Create a parent scope with a different variable "x" bound to 200
-        let mut parent_scope = VarScope::new();
         let parent_variable = Var::new("x".to_string(), Extent::Base(BaseType::Int));
         // Create parent subscription and wire up binding properly
         let parent_subscription = parent_variable.create_subscription(VarSource::Uninitialized);
@@ -1430,7 +1469,7 @@ mod tests {
         parent_subscription
             .borrow_mut()
             .set_source(VarSource::Bound(parent_binding));
-        parent_scope.add_variable("x".to_string(), parent_subscription);
+        let parent_scope = VarScope::new("x".to_string(), parent_subscription);
 
         let mut binding_literal = Literal::new(Value::Int(100));
 

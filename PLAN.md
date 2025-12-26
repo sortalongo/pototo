@@ -102,11 +102,11 @@ Use the parent scope chain directly instead of a separate scan_chain.
 4. `VarRefSub` stores the scan chain and composes parent_indices in `get()`
 
 **Implementation Steps:**
-- [ ] Refactor `VarScope` to store single variable (name + subscription) instead of HashMap
-- [ ] Update `lookup_variable()` to return `(VarSub, Vec<Rc<RefCell<VarSub>>>)` - variable + inner scans
-- [ ] `VarRefSub` stores scan chain for alignment
-- [ ] `VarRefSub::get()` composes parent_indices through chain
-- [ ] Tests for 2-level and 3-level nested scans
+- [x] Refactor `VarScope` to store single variable (name + subscription) instead of HashMap
+- [x] Update `lookup_variable()` to return `(VarSub, Vec<Rc<RefCell<VarSub>>>)` - variable + inner scans
+- [x] `VarRefSub` stores scan chain for alignment
+- [x] `VarRefSub::get()` composes parent_indices through chain
+- [ ] Tests for 2-level and 3-level nested scans (requires scanning mode to be fully implemented)
 
 ### Step 8: Application Operator
 - [ ] `Application` operator implementation
