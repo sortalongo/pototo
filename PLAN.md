@@ -73,15 +73,46 @@ This document tracks the implementation progress of the PCL (Pototo Core Languag
 
 ## In Progress 🚧
 
-### Step 7: Variable Binding Modes
+### Step 7: Variable Binding Modes ✓
 - [x] Refactor `Var` to remove static `definition` field
 - [x] Add `VarSource` enum to `VarSub` (Bound vs Scanning modes)
 - [x] Update `Var::create_subscription()` with yield_guard parameter
 - [x] Update Lambda with `subscribe_with_binding()` for Bound mode
 - [x] Update tests for new API
 - [x] Fix up TODOs left by review (removed dead Operator impl, eliminated placeholder VarSub, clarified yield_guard)
-- [ ] Add `innermost_scan` tracking to `VarScope`
-- [ ] Implement alignment logic in `VarRefSub::get()`
+
+### Step 7b: Scan Chain & Multi-Level Alignment
+The original "innermost_scan" approach only handles 2 nesting levels. For 3+ nested scans,
+we need to compose parent_indices through all intermediate levels.
+
+**Problem Example:**
+```
+sum(\t1. sum(\t2. sum(\t3. v(t1) + v(t2) + v(t3))))
+```
+When referencing `v(t1)` from t3's context:
+- t3's parent_indices point to t2 (not t1)
+- Must compose: t3→t2→t1 to get correct alignment
+
+**Design:**
+1. `VarScope` tracks full scan chain: `Vec<Rc<RefCell<VarSub>>>`
+2. Each VarSub in scanning mode knows its depth in the chain
+3. When `add_scanning_variable()` is called, push to the scan chain
+4. `VarRefSub` stores the scan chain slice from referenced variable's depth to innermost
+5. `VarRefSub::get()` composes parent_indices through the chain:
+   ```
+   fn compose_indices(outer: &[usize], inner: &[usize]) -> Vec<usize> {
+       inner.iter().map(|&i| outer[i]).collect()
+   }
+   ```
+
+**Implementation Steps:**
+- [ ] Add `scan_chain: Vec<Rc<RefCell<VarSub>>>` to `VarScope`
+- [ ] Add `scan_depth: Option<usize>` to `VarSub` (None for bound, Some(n) for scanning at depth n)
+- [ ] `add_scanning_variable()` pushes to chain and sets depth
+- [ ] `lookup_variable()` returns variable + relevant scan chain slice
+- [ ] `VarRefSub` stores scan chain slice for alignment
+- [ ] `VarRefSub::get()` composes parent_indices through chain
+- [ ] Tests for 2-level and 3-level nested scans
 
 ### Step 8: Application Operator
 - [ ] `Application` operator implementation
