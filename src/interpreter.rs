@@ -407,7 +407,7 @@ pub trait Operator {
     fn subscribe(
         &mut self,
         intent_guard: Guard,
-        consumer: Box<dyn Consumer>,
+        consumer: Box<dyn Consumer>, // TODO: Should we make this a trait bound so we don't assume a Box pointer type?
         var_scope: Option<VarScope>,
     ) -> Box<dyn Producer>;
 }
@@ -554,6 +554,9 @@ impl VarScope {
 /// The source of values for a variable subscription.
 /// Determines whether the variable is bound to a producer or scanning its extent.
 pub enum VarSource {
+    /// Uninitialized state - used during construction when source will be set later.
+    /// VarSub operations will panic if called while in this state.
+    Uninitialized,
     /// Variable is bound to a producer (from Application).
     /// The variable forwards values from this producer.
     Bound(Box<dyn Producer>),
@@ -608,23 +611,13 @@ impl Var {
 
     /// Create a VarSub for this variable with the given source.
     ///
-    /// For Bound mode: The yield_guard should be provided to indicate readiness.
-    /// For Scanning mode: The subscription starts with an empty yield guard.
+    /// The subscription starts with an empty yield guard. For Bound mode, the
+    /// binding operator will notify VarSub when data is ready. For Scanning mode,
+    /// the scan will notify when data is available.
     ///
     /// Consumers can be added later via `VarSub::add_consumer()`.
-    pub fn create_subscription(
-        &self,
-        source: VarSource,
-        yield_guard: Option<Guard>,
-    ) -> Rc<RefCell<VarSub>> {
-        let subscription = Rc::new(RefCell::new(VarSub::new(source)));
-
-        // Set yield guard if provided (for Bound mode)
-        if let Some(guard) = yield_guard {
-            subscription.borrow_mut().yield_guard = guard;
-        }
-
-        subscription
+    pub fn create_subscription(&self, source: VarSource) -> Rc<RefCell<VarSub>> {
+        Rc::new(RefCell::new(VarSub::new(source)))
     }
 }
 
@@ -686,11 +679,24 @@ impl VarSub {
     pub fn is_scanning(&self) -> bool {
         matches!(self.source, VarSource::Scanning { .. })
     }
+
+    /// Set the source for this variable subscription.
+    /// Used when the source needs to be updated after creation (e.g., for Bound mode).
+    pub fn set_source(&mut self, source: VarSource) {
+        assert!(
+            matches!(self.source, VarSource::Uninitialized),
+            "VarSub::set_source() called while source is not Uninitialized"
+        );
+        self.source = source;
+    }
 }
 
 impl Producer for VarSub {
     fn get(&mut self) -> ColumnValue {
         match &mut self.source {
+            VarSource::Uninitialized => {
+                panic!("VarSub::get() called while source is Uninitialized")
+            }
             VarSource::Bound(producer) => producer.get(),
             VarSource::Scanning {
                 extent,
@@ -715,6 +721,9 @@ impl Producer for VarSub {
         self.store_release_guard(obsolete_guard.clone());
         // Forward release to source
         match &mut self.source {
+            VarSource::Uninitialized => {
+                panic!("VarSub::release() called while source is Uninitialized")
+            }
             VarSource::Bound(producer) => producer.release(obsolete_guard),
             VarSource::Scanning { .. } => {
                 // For scanning, just return the obsolete guard unchanged
@@ -973,20 +982,20 @@ impl Lambda {
         }
     }
 
-    /// Subscribe to this lambda with an explicit binding for the variable.
+    /// Subscribe to this lambda with an explicit binding operator for the variable.
     /// This is used by Application to bind the argument to the lambda's variable.
     ///
     /// # Arguments
     /// * `intent_guard` - The region of the function extent the consumer is interested in
     /// * `consumer` - The consumer that will receive notifications
     /// * `var_scope` - The variable scope for looking up outer variables
-    /// * `binding` - The producer that provides values for the lambda's variable (Bound mode)
+    /// * `binding` - The operator that provides values for the lambda's variable (Bound mode)
     pub fn subscribe_with_binding(
         &mut self,
         intent_guard: Guard,
         consumer: Box<dyn Consumer>,
         var_scope: Option<VarScope>,
-        binding: Box<dyn Producer>,
+        binding: &mut dyn Operator,
     ) -> Box<dyn Producer> {
         self.subscribe_internal(intent_guard, consumer, var_scope, Some(binding))
     }
@@ -997,7 +1006,7 @@ impl Lambda {
         intent_guard: Guard,
         consumer: Box<dyn Consumer>,
         var_scope: Option<VarScope>,
-        binding: Option<Box<dyn Producer>>,
+        binding: Option<&mut dyn Operator>,
     ) -> Box<dyn Producer> {
         // Split intent guard into domain and codomain
         let (domain_guard, codomain_guard) = intent_guard
@@ -1011,38 +1020,39 @@ impl Lambda {
             VarScope::new()
         };
 
-        // Determine the VarSource and yield guard based on whether we have a binding
-        let (var_source, var_yield_guard) = match binding {
-            Some(producer) => (
-                VarSource::Bound(producer),
-                // TODO: For now, bound producers are ready when created because the upstream operator's
-                // subscribe() calls notify() before returning. This assumption holds for
-                // all current operators. When we add lazy/async operators, we'll need to
-                // thread the yield guard through the binding.
-                Some(Guard::Universal),
-            ),
-            None => (
-                VarSource::Scanning {
-                    extent: self.variable.extent().clone(),
-                    predicate: domain_guard.clone(),
-                },
-                None, // Scanning mode starts with empty guard
-            ),
+        // For Bound mode: subscribe to the binding operator with VarSub as consumer
+        // This ensures VarSub receives notifications and can forward to its consumers
+        let variable_subscription = if let Some(binding_op) = binding {
+            let subscription = self.variable.create_subscription(VarSource::Uninitialized);
+
+            // Subscribe to binding with VarSub as the consumer
+            // VarSub implements Consumer, so it will receive notifications
+            let var_sub_consumer: Box<dyn Consumer> = Box::new(subscription.clone());
+            let binding_producer =
+                binding_op.subscribe(domain_guard.clone(), var_sub_consumer, None);
+
+            // Now set the source to Bound with the actual producer
+            subscription
+                .borrow_mut()
+                .set_source(VarSource::Bound(binding_producer));
+            subscription
+        } else {
+            // Scanning mode
+            self.variable.create_subscription(VarSource::Scanning {
+                extent: self.variable.extent().clone(),
+                predicate: domain_guard.clone(),
+            })
         };
 
-        // Create the variable subscription first (without consumer yet)
-        let variable_subscription = self
-            .variable
-            .create_subscription(var_source, var_yield_guard);
-
-        // Create LambdaProducer with the real variable subscription (body_producer set later)
+        // Create LambdaProducer with the variable subscription (body_producer set later)
         let lambda_producer = Rc::new(RefCell::new(LambdaProducer::new(
             variable_subscription.clone(),
             consumer,
             intent_guard.clone(),
         )));
 
-        // Now create the variable consumer closure that captures LambdaProducer
+        // Create the variable consumer closure that captures LambdaProducer
+        // This is added to VarSub's consumers so it gets notified when the variable is ready
         let lambda_producer_for_var = lambda_producer.clone();
         let variable_consumer: Box<dyn Consumer> = Box::new(move |yield_guard: Guard| {
             let mut producer = lambda_producer_for_var.borrow_mut();
@@ -1051,7 +1061,8 @@ impl Lambda {
         });
 
         // Add the consumer to the variable subscription
-        // (add_consumer handles the case where data is already ready)
+        // For Bound mode: VarSub may have already been notified by the binding, and add_consumer
+        // will immediately notify this consumer if yield_guard is non-empty
         variable_subscription
             .borrow_mut()
             .add_consumer(variable_consumer);
@@ -1189,18 +1200,23 @@ mod tests {
 
         assert_eq!(var_ref.extent(), &Extent::Base(BaseType::Int));
 
-        // Create a binding (the producer that provides the variable's value)
-        let mut binding_literal = Literal::new(Value::Int(42));
-        let (binding_consumer, _) = TestConsumer::new();
-        let binding_producer =
-            binding_literal.subscribe(Guard::universal(), Box::new(binding_consumer), None);
+        // Create VarSub in Uninitialized state first
+        let var_subscription = variable.create_subscription(VarSource::Uninitialized);
 
-        // Create a VarScope with the variable bound to the literal
+        // Subscribe to the binding literal with VarSub as the consumer
+        // This ensures VarSub receives notifications
+        let mut binding_literal = Literal::new(Value::Int(42));
+        let var_sub_consumer: Box<dyn Consumer> = Box::new(var_subscription.clone());
+        let binding_producer =
+            binding_literal.subscribe(Guard::universal(), var_sub_consumer, None);
+
+        // Now set VarSub's source to Bound with the producer
+        var_subscription
+            .borrow_mut()
+            .set_source(VarSource::Bound(binding_producer));
+
+        // Create a VarScope with the variable
         let mut var_scope = VarScope::new();
-        let var_subscription = variable.create_subscription(
-            VarSource::Bound(binding_producer),
-            Some(Guard::Universal), // Bound producer is immediately ready
-        );
         var_scope.add_variable("x".to_string(), var_subscription);
 
         // Subscribe and verify it works
@@ -1208,7 +1224,7 @@ mod tests {
         let mut producer =
             var_ref.subscribe(Guard::universal(), Box::new(consumer), Some(var_scope));
 
-        // Verify notification was received
+        // Verify notification was received (flows: Literal → VarSub → VarRefSub → consumer)
         let notifications_borrowed = notifications.borrow();
         assert_eq!(notifications_borrowed.len(), 1);
         assert_eq!(notifications_borrowed[0], Guard::universal());
@@ -1249,19 +1265,14 @@ mod tests {
         let body = Box::new(VarRef::new("x".to_string(), Extent::Base(BaseType::Int)));
         let mut lambda = Lambda::new(variable, body);
 
-        // Create a binding for the variable (like Application would do)
         let mut binding_literal = Literal::new(Value::Int(42));
-        let (binding_consumer, _) = TestConsumer::new();
-        let binding_producer =
-            binding_literal.subscribe(Guard::universal(), Box::new(binding_consumer), None);
 
-        // Subscribe to the lambda with the binding
         let (consumer, notifications) = TestConsumer::new();
         let mut producer = lambda.subscribe_with_binding(
             Guard::universal(),
             Box::new(consumer),
             None,
-            binding_producer,
+            &mut binding_literal,
         );
 
         // Check notifications - we should get one when both are ready
@@ -1292,19 +1303,15 @@ mod tests {
         let body = Box::new(Literal::new(Value::Int(10)));
         let mut lambda = Lambda::new(variable, body);
 
-        // Create a binding for the variable
         let mut binding_literal = Literal::new(Value::Int(0));
-        let (binding_consumer, _) = TestConsumer::new();
-        let binding_producer =
-            binding_literal.subscribe(Guard::universal(), Box::new(binding_consumer), None);
 
-        // Subscribe to the lambda with the binding
+        // Subscribe to the lambda with the binding operator
         let (consumer, notifications) = TestConsumer::new();
         let mut producer = lambda.subscribe_with_binding(
             Guard::universal(),
             Box::new(consumer),
             None,
-            binding_producer,
+            &mut binding_literal,
         );
 
         // Both variable and body should notify
@@ -1337,19 +1344,15 @@ mod tests {
         let body = Box::new(VarRef::new("x".to_string(), Extent::Base(BaseType::Int)));
         let mut lambda = Lambda::new(variable, body);
 
-        // Create a binding for the variable
         let mut binding_literal = Literal::new(Value::Int(42));
-        let (binding_consumer, _) = TestConsumer::new();
-        let binding_producer =
-            binding_literal.subscribe(Guard::universal(), Box::new(binding_consumer), None);
 
-        // Subscribe to the lambda with the binding
+        // Subscribe to the lambda with the binding operator
         let (consumer, _) = TestConsumer::new();
         let mut producer = lambda.subscribe_with_binding(
             Guard::universal(),
             Box::new(consumer),
             None,
-            binding_producer,
+            &mut binding_literal,
         );
 
         // Call get to ensure everything is set up
@@ -1371,11 +1374,7 @@ mod tests {
         let body = Box::new(VarRef::new("x".to_string(), Extent::Base(BaseType::Int)));
         let mut lambda = Lambda::new(variable, body);
 
-        // Create a binding for the variable
         let mut binding_literal = Literal::new(Value::Int(42));
-        let (binding_consumer, _) = TestConsumer::new();
-        let binding_producer =
-            binding_literal.subscribe(Guard::universal(), Box::new(binding_consumer), None);
 
         // Subscribe with a function guard
         let domain_guard = Guard::Equality {
@@ -1386,8 +1385,12 @@ mod tests {
         let intent_guard = Guard::from_function_parts(domain_guard, codomain_guard);
 
         let (consumer, notifications) = TestConsumer::new();
-        let mut producer =
-            lambda.subscribe_with_binding(intent_guard, Box::new(consumer), None, binding_producer);
+        let mut producer = lambda.subscribe_with_binding(
+            intent_guard,
+            Box::new(consumer),
+            None,
+            &mut binding_literal,
+        );
 
         // Should receive notification
         let notifications_borrowed = notifications.borrow();
@@ -1418,24 +1421,20 @@ mod tests {
         // Create a parent scope with a different variable "x" bound to 200
         let mut parent_scope = VarScope::new();
         let parent_variable = Var::new("x".to_string(), Extent::Base(BaseType::Int));
-        // Create a binding for the parent variable
+        // Create parent subscription and wire up binding properly
+        let parent_subscription = parent_variable.create_subscription(VarSource::Uninitialized);
         let mut parent_literal = Literal::new(Value::Int(200));
-        let (parent_binding_consumer, _) = TestConsumer::new();
+        let parent_sub_consumer: Box<dyn Consumer> = Box::new(parent_subscription.clone());
         let parent_binding =
-            parent_literal.subscribe(Guard::universal(), Box::new(parent_binding_consumer), None);
-        let parent_subscription = parent_variable.create_subscription(
-            VarSource::Bound(parent_binding),
-            Some(Guard::Universal), // Bound producer is immediately ready
-        );
+            parent_literal.subscribe(Guard::universal(), parent_sub_consumer, None);
+        parent_subscription
+            .borrow_mut()
+            .set_source(VarSource::Bound(parent_binding));
         parent_scope.add_variable("x".to_string(), parent_subscription);
 
-        // Create a binding for the lambda's variable (100)
         let mut binding_literal = Literal::new(Value::Int(100));
-        let (binding_consumer, _) = TestConsumer::new();
-        let binding_producer =
-            binding_literal.subscribe(Guard::universal(), Box::new(binding_consumer), None);
 
-        // Subscribe to lambda with parent scope and binding
+        // Subscribe to lambda with parent scope and binding operator
         // The lambda should create its own scope, so the body should reference
         // the lambda's variable (100), not the parent's (200)
         let (consumer, _) = TestConsumer::new();
@@ -1443,7 +1442,7 @@ mod tests {
             Guard::universal(),
             Box::new(consumer),
             Some(parent_scope),
-            binding_producer,
+            &mut binding_literal,
         );
 
         // Get the value - should use lambda's variable (100), not parent's (200)
@@ -1469,18 +1468,14 @@ mod tests {
         let body = Box::new(Literal::new(Value::Int(2)));
         let mut lambda = Lambda::new(variable, body);
 
-        // Create a binding for the variable
         let mut binding_literal = Literal::new(Value::Int(1));
-        let (binding_consumer, _) = TestConsumer::new();
-        let binding_producer =
-            binding_literal.subscribe(Guard::universal(), Box::new(binding_consumer), None);
 
         let (consumer, notifications) = TestConsumer::new();
         let _producer = lambda.subscribe_with_binding(
             Guard::universal(),
             Box::new(consumer),
             None,
-            binding_producer,
+            &mut binding_literal,
         );
 
         // Both variable binding and body should notify, and LambdaProducer should
@@ -1497,5 +1492,37 @@ mod tests {
         let last_notification = notifications_borrowed.last().unwrap();
         // It should not be empty
         assert!(!last_notification.is_empty());
+    }
+
+    #[test]
+    fn test_binding_notifications_flow_through_varsub() {
+        // This test verifies that binding notifications flow through VarSub to VarRefSub.
+        // Previously, we had a bug where the binding's consumer was a TestConsumer,
+        // so notifications never reached VarSub. VarSub's yield_guard was set manually,
+        // which made add_consumer() notify immediately, masking the issue.
+        //
+        // This test catches the bug by:
+        // 1. Creating a lambda with a VarRef body (so VarRefSub is in the consumers list)
+        // 2. Verifying a notification is received by the lambda's consumer.
+
+        let variable = Var::new("x".to_string(), Extent::Base(BaseType::Int));
+        let body = Box::new(VarRef::new("x".to_string(), Extent::Base(BaseType::Int)));
+        let mut lambda = Lambda::new(variable, body);
+
+        let mut binding_literal = Literal::new(Value::Int(42));
+
+        let (consumer, notifications) = TestConsumer::new();
+        let _producer = lambda.subscribe_with_binding(
+            Guard::universal(),
+            Box::new(consumer),
+            None,
+            &mut binding_literal,
+        );
+
+        assert!(
+            notifications.borrow().len() == 1,
+            "Expected exactly 1 notification from proper binding flow, got {:#?}.",
+            notifications.borrow()
+        );
     }
 }
