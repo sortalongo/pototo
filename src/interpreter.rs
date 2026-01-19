@@ -537,7 +537,10 @@ impl VarScope {
     /// Look up a variable by name, searching up the parent chain.
     /// Returns (subscription, scan_chain) where scan_chain contains any scanning
     /// variables between the current scope and the found variable (for alignment).
-    pub fn lookup_variable(&self, name: &str) -> Option<(Rc<RefCell<VarSub>>, Vec<Rc<RefCell<VarSub>>>)> {
+    pub fn lookup_variable(
+        &self,
+        name: &str,
+    ) -> Option<(Rc<RefCell<VarSub>>, Vec<Rc<RefCell<VarSub>>>)> {
         self.lookup_with_chain(name, Vec::new())
     }
 
