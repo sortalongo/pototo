@@ -35,12 +35,26 @@ There's a strange incongruency between the elegance of programming languages and
 
 ## 3. The root cause: Fragmentation
 
-Modern systems are assembled from pieces: databases, caches, queues, services, frontends. Each has its own programming model, semantics, and failure modes. Developers manually translate intent across these boundaries with limited help from tooling.
+Modern systems are assembled from components: databases, caches, queues, services, frontends.
+On one hand, these components are tremendously empowering for developers. 
+They make it possible to quickly assemble systems with capabilities that would be impossible if every developer had to implement their own.
+In principle, all you have to do is take these components off the shelf and assemble them into a coherent system with a bit of glue code. Then, voila, you have a sophisticated, robust system.
+
+Unfortunately, when you try to follow this process, you realize a few things:
+1. It's extremely tedious. The job of so many software developers in the last decade has come to involve a tremendous amount of configuration management and quality assurance, at the cost of the creativity and ingenuity that attracted us to the field.
+2. It's highly error prone. Since there's no single, coherent programming model spanning all of these components, ensuring that they're assembled together correctly is purely the developer's responsibility, with only limited tooling available to assist.
+3. It's unperformant. Many architectural decisions are (rightly) driven by the need to mitigate development cost and deployment risk. As a result, performance is often left as an afterthought, resulting in a poor user experience and wasted computing resources compared to what a system could be.
+
+We'd like to have automated tooling to help us reason about these systems to ensure correctness, to optimize the code we write, and to help us evolve our systems over time. However, automation relies on having a clear framework within which to operate. 
+There is no such framework because each component has its own programming model, semantics, and failure modes.
+Every time these components are combined in a novel way, new behavior can emerge.
+We call this problem the *fragmentation of abstractions*.
+
+Without such a framework, the potential impact of automation is very limited, which is why systems tend to be brittle, and developing them is tedious and stressful.
 
 
 - Historical reasons for the split (durability, query optimization, shared access)
 - Consequence: two incompatible worldviews reconciled by hand
-- Every interface is an opportunity for bugs and missed optimizations
 
 ## 4. The opportunity: What's possible if we fixed this?
 
@@ -51,22 +65,26 @@ Held back on several fronts:
 
 Think about how much productivity could be improved if these limitations were lifted. The difference becomes even more significant in a world where agents are accelerating us: agents are really good a churning out straightforward code and iterating against an oracle. They're really bad at reasoning broadly, connecting disparate pieces, and building out necessary infrastructure.
 
-Look at examples of where agentic coding is most powerful. It's when working within existing, self-consistent frameworks:
+Look at examples of where agentic coding is most powerful. It's when working within narrow environments with clear rules:
 - stateless, single-page javascript apps
-- boring, standard-architecture 3-tier apps
-- writing SQL _inside_ of a data warehouse
+- Standard, boilerplate 3-tier archictures
+- Isolated SQL tasks within a single, well-documented data warehouse
 
 
 ## 5. Properties of a solution
 
-**Metallurgy metaphor to weave in:**
+<!-- **Metallurgy metaphor to weave in:**
 - Our systems are like brittle metal—rigid crystalline structures with grain boundaries (the seams between services, databases, APIs)
 - Stress concentrates at these boundaries: that's where bugs happen, where changes break things, where optimization stops
 - The structure looks solid but fractures under pressure
 - What we need is a forge—a process that transforms brittle material by unifying its internal structure
-- In annealed metal, the grain boundaries dissolve; stress flows through instead of concentrating
+- In annealed metal, the grain boundaries dissolve; stress flows through instead of concentrating -->
 
-**Properties (framed as what the "forge" would produce):**
+**Properties:**
 - Unified model for state and computation (no grain boundaries)
-- Semantics that enable automated reasoning (stress can flow—verification and optimization work across the whole)
-- Flexibility to map to different physical implementations (the unified structure can be shaped into different forms without fracturing)
+- Semantics that enable automated reasoning—verification and optimization work across the whole
+- Flexibility to map to different physical implementations 
+
+TODO: Comparison to existing solutions
+
+We're building a solution with these properties. Excited to talk more about what it'll look like!
