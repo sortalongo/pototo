@@ -82,7 +82,7 @@ Sometimes, they are designed to interact with other components with the same mod
 But sometimes, they are designed to interact using a lower-level model, like a microservice exposing an API.
 When we build a system out of components, the model we use to reason about the system is determined by the interaction models, not the internal models, of the components.
 So, when components use a lower-level model to interact, systems built using those components are forced to also use that lower-level model.
-In the world of internet software, systems are overwhelmingly forced into what I'd call the "networks and operating systems" model.
+In the world of internet software, systems are overwhelmingly forced into what we call the "networks and operating systems" model.
 In this model, we have computers, processes, memory, network addresses, packets, and the like.
 Those are fantastically powerful abstractions, but they're far removed from the concepts we have in mind when writing our programs.
 They work in terms of bytes and addresses, not objects, people, places, and actions.
@@ -165,7 +165,7 @@ There are many examples of such models that allow one to build coherent systems 
 When working entirely within models like these, the leverage of tooling is much greater.
 Programmers often get big boosts in their productivity, and the coherent systems they build often have better correctness and performance than comparable fragmented systems.
 
-So it sounds like I'm arguing that coherent systems are always the way to go, and we should all just buy into whatever model will let us get our job done. Right?
+So it sounds like we're arguing that coherent systems are always the way to go, and everyone should just buy into whatever model will let them get their job done. Right?
 The problem is that all of the high-level models I listed above are domain-specific.
 They don't generalize to other contexts.
 And that's a big problem because most modern internet software systems are not domain-specific.
@@ -236,17 +236,18 @@ Code is often "low level", in the sense of "it doesn't map well to the concepts 
 But this is not an inherent property of all code. It's a property of the model being used.
 Some models are low-level, some are high-level. But code can be either.
 What code is truly about is precision. Code has semantics—it's unambiguous. 
-It's easy to understand why someone would unintentionally conflate ambiguity and abstraction. The distinction is nuanced.
-Both mean "a single statement that could refer to multiple meanings". But the meanings of an ambiguous statement are not constrained by anything. 
-In contrast, the meanings of an abstract statement are very tightly constrained by the semantics of the relevant model.
-Those semantics are intentionally designed to yield useful groupings of meanings so that you don't end up with a combinatorial explosion of possible meanings when you compose statements.
+It's easy to conflate ambiguity and abstraction—both involve "a single statement that could refer to multiple meanings." 
+But the meanings of an ambiguous statement are unconstrained. 
+The meanings of an abstract statement are tightly constrained by the semantics of the model. 
+Those semantics are designed to yield useful groupings, so you don't get a combinatorial explosion when you compose statements.
 Prose is ambiguous, and always will be. Fluidity of meaning is core to its utility.
 Code is precise. Precision is core to its utility.
 Whether the one reading and writing that code is a human or AI may shift over time.
 But code will never be obviated by prose because precision will always be important when designing a complex system.
 
-The second misunderstanding relates to levels of abstraction. Saying that a programmer will work with an AI in terms of prose leaves out the concepts they will use for that communication.
-Even in prose, models will always be important.
+The second misunderstanding relates to levels of abstraction.
+Even when communicating in prose, programmers and AI still need shared concepts to reason about.
+Models will always be important for that.
 Without layers of abstraction, complexity grows combinatorially. No matter how fast AI gets smarter, combinatorial explosions can always grow faster.
 The only way to make progress is to find ways to reduce the exponential into polynomial amounts of work.
 That's what the difference between fragmented and coherent systems is all about.
