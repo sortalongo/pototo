@@ -34,7 +34,7 @@ Better models work in terms of intuitive, well-behaved concepts.
 They also give you clear, useful rules about how to create programs and reason about their behavior.
 Great models give you superpowers: using them makes it easier to think about programs, easier to write and read programs, and easier to create tooling to manipulate (i.e. verify, optimize, refactor, etc) those programs.
 
-In a sense, all modern computer programs work in terms of the same foundational model: bits stored in memory and instructions to manipulate them, arranged in a dizzying variety of configurations depending on the hardware they're instantiated in. 
+So why don't we just use great models all the time? To answer that, we need to start at the bottom. In a sense, all modern computer programs work in terms of the same foundational model: bits stored in memory and instructions to manipulate them, arranged in a dizzying variety of configurations depending on the hardware they're instantiated in. 
 But this model is so low-level that it's hard to map its concepts to the familiar, high-level concepts we typically care about.
 In other words, given a program written in terms of bits and intructions, it's very difficult to infer its purpose.
 Conversely, given a high-level specification of a program's effects on the real world, it's very difficult to create a "bits and instructions" program that will satisfy that specification.
@@ -46,20 +46,20 @@ When writing a program in Java, you lose the ability to manually manage memory.
 But with that loss of control comes a reduction in complexity, which is often a favorable trade.
 When using Java, you generally don't have to worry about memory management, and so may be more productive than in a lower-level language.
 
-The best higher-level models are such that it rarely makes sense to work directly in terms of the lower-level model they abstract over.
-We think of these models as **sealed**: they provide an abstraction that doesn't leak its internal details often.
-The modern world has many examples of ubiquitous, sealed models.
-It's very uncommon to want to write programs directly in assembly rather than a programming language, that don't run on an operating system, or that don't store state (if they have any) in a database.
-Once a model in some domain becomes sealed, we see a shift in the kinds of programs that are developed in that domain.
-Efforts bifurcate into developing programs in terms of that model, and developing programs that implement that model.
-For example, most of the knowledge and effort that goes into understanding the specific instructions of various hardware architectures lies with compiler developers, not general-purpose programmers.
-
-The magic of high-level models comes from tooling.
-Tooling can help us to ensure correctness, improve performance, and evolve our systems over time.
+Much of the value of high-level models comes from tooling.
+Tooling can help us ensure correctness, improve performance, and evolve our systems over time.
 But tooling works in terms of a specific model, and only has leverage over the concepts in that model.
 For example, consider what an OS-level tool like `top` can tell you about your program: resource consumption, uptime, network throughput, etc.
 It cannot do the things that are possible for a language-level tool like `gdb`, which works in terms of C's programming model.
-In general, tooling is useful at every level, as there are usually things that can only be done at that level.
+
+But tooling only helps when you're working within its model. If you frequently need to "escape" to a lower level, you lose those benefits.
+The best higher-level models are ones where you rarely need to escape.
+We call these models **sealed**: they provide an abstraction that doesn't leak its internal details often.
+The modern world has many examples of ubiquitous, sealed models.
+It's very uncommon to want to write programs directly in assembly, that don't run on an operating system, or that don't store state in a database.
+Once a model becomes sealed, efforts bifurcate: some people develop programs in terms of that model, others develop programs that implement it.
+
+This is the ideal: work within a sealed, high-level model, and let tooling handle the rest. But what happens when the system you're building doesn't fit within a single model?
 
 ## Components & Systems
 
@@ -125,8 +125,8 @@ In practice, that brittleness manifests in many ways.
 *Impedance Mismatches*
 - The type systems of DBs and PLs are often incompatible, leading to subtle edge cases that are hard to test because they depend on the data actually stored in the DB. Logic tests and data tests live in separate worlds even though they're fundamentally specifying requirements on the same program.
 - Your ORM makes relationships easy to traverse, but generates N+1 queries because it doesn't understand the database
- 
-What is the cause of this brittleness?
+
+These are symptoms. What is the underlying cause of this brittleness?
 The nature of a fragmented system forces the developer to rely on a low-level model to reason about the system's behavior. 
 These mismatched concepts mean that the components comprising fragmented systems are not trivially composable.
 Every time a component is added or modified in a fragmented system, the implications of that change on other parts of the system are not constrained by that component's internal model.
@@ -134,7 +134,7 @@ They are only constrained by the low-level interaction model, constraints which 
 The developer is responsible for carefully thinking through the implications of each change in terms of the interaction model.
 Reaching confidence that the system meets its requirements typically requires extensive validation.
 
-Good architecture can limit the scope that some changes can have on a system.
+Can good architecture mitigate this? Somewhat. Good architecture can limit the scope that some changes can have on a system.
 A well-architected system is divided into independent components, and most changes to such a system only require changes within a given component.
 That means the implications of those changes can be considered only in terms of the component's internal model.
 We call such changes **localized**.
@@ -180,11 +180,10 @@ The industry's response to this situation has been to accept fragmentation as in
 This is pragmatic advice—it reflects reality. But it also encodes a hidden assumption: that fragmentation is an acceptable cost, that we can't do better.
 We reject that assumption.
 
-
 ## General-Purpose Models & Coherence
 
-The fact that most high-level models are domain specific begs a question: why?
-If it were possible to implement a general-purpose high-level model, wouldn't one already exist?
+But rejecting an assumption isn't the same as proving it wrong. Is a general-purpose, high-level model actually possible?
+If it were possible, wouldn't one already exist?
 You might speculate that there's an inherent tradeoff between generality and how high-level a model can be.
 Looking at the current population of models, we do observe such a trend empirically.
 But it doesn't seem strictly necessary.
@@ -196,7 +195,7 @@ Furthermore, there are examples of the general-purpose vs high-level tradeoff be
 The Rust language is at once more general-purpose than C, higher-level, and has better tooling.
 These innovations are rare, but they are possible.
 
-If we could build a high-level, sealed model that were general-purpose across the domains typically required to build internet software, coherent systems could be built atop it without being fenced in to a single narrow domain.
+So let's imagine one more such innovation. If we could build a high-level, sealed model that were general-purpose across the domains typically required to build internet software, coherent systems could be built atop it without being fenced in to a single narrow domain.
 This would create tremendous opportunities for tooling:
 - Development would be accelerated dramatically by enabling components to interact directly in terms of a high-level model.
 - System-wide verification would become tractable for most applications.
@@ -223,7 +222,7 @@ But the most powerful form of tooling emerged only recently in the form of agent
 Agents are much more flexible than traditional forms of tooling, and they have tremendous potential for improving the productivity of developers.
 They already represent a revolution in software development, and into fields far beyond.
 
-There a popular narrative that AI itself is sufficient to realize the opportunities referenced above.
+Given this, there's a popular narrative that AI itself is sufficient to realize the opportunities referenced above.
 In this narrative, code is merely a by-product, an intermediate representation of the programmer's intent, the truth of which is captured by the prose prompts and documents that are provided to the agents.
 The agents will handle all of the complexity of code. 
 We don't need to worry about abstractions or maintainability.
@@ -254,8 +253,7 @@ That's what the difference between fragmented and coherent systems is all about.
 The distinction will never become irrelevant, no matter who is building the system.
 We will just keep building better and better models, extending the reach of coherence to ever greater heights.
 
-We understand that these are bold claims to make, especially on abstract, philosophical terms.
-But there is substantial evidence already if you look at examples of where agentic coding is most powerful. 
+There is substantial evidence for this view if you look at where agentic coding is most powerful today. 
 It's when working within narrow environments with clear rules, such as:
 - Stateless, single-page javascript apps
 - Standard 3-tier architectures using a good web framework
