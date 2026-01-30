@@ -15,7 +15,7 @@ But before we can explain what that thing is, we need to step back and talk abou
 Decades of effort by thousands of brilliant minds have gone into the field of computing.
 That foundation deserves its due: before proposing a departure from it, it's important to understand what you're departing from, and why.
 In this post, we're going to argue that the orthodoxy creates a forced choice between powerful tooling and general-purpose software.
-But this is a false dichotomy--we can have both at once.
+But this is a false dichotomy—we can have both at once.
 
 ## Models
 
@@ -36,7 +36,7 @@ Great models give you superpowers: using them makes it easier to think about pro
 
 So why don't we just use great models all the time? To answer that, we need to start at the bottom. In a sense, all modern computer programs work in terms of the same foundational model: bits stored in memory and instructions to manipulate them, arranged in a dizzying variety of configurations depending on the hardware they're instantiated in. 
 But this model is so low-level that it's hard to map its concepts to the familiar, high-level concepts we typically care about.
-In other words, given a program written in terms of bits and intructions, it's very difficult to infer its purpose.
+In other words, given a program written in terms of bits and instructions, it's very difficult to infer its purpose.
 Conversely, given a high-level specification of a program's effects on the real world, it's very difficult to create a "bits and instructions" program that will satisfy that specification.
 
 To make this mapping easier, we build higher-level models atop this foundation: programming languages, operating systems, databases, etc.
@@ -56,7 +56,7 @@ But tooling only helps when you're working within its model. If you frequently n
 The best higher-level models are ones where you rarely need to escape.
 We call these models **sealed**: they provide an abstraction that doesn't leak its internal details often.
 The modern world has many examples of ubiquitous, sealed models.
-It's very uncommon to want to write programs directly in assembly, that don't run on an operating system, or that don't store state in a database.
+It's rare to find programs written directly in assembly, or that bypass the operating system, or that manage state without a database.
 Once a model becomes sealed, efforts bifurcate: some people develop programs in terms of that model, others develop programs that implement it.
 
 This is the ideal: work within a sealed, high-level model, and let tooling handle the rest. But what happens when the system you're building doesn't fit within a single model?
@@ -71,8 +71,8 @@ In principle, all a developer has to do is take these components off the shelf, 
 Unfortunately, too often, when you try to follow this process, you realize a few things:
 1. It's extremely tedious. The job of so many software developers in the last decade has come to involve an inordinate amount of configuration management and quality assurance, at the cost of the creativity and ingenuity that attracted us to the field.
 2. It's inflexible. Once you've chosen some components and wired them together, changing the capabilities of your system is quite difficult, since you usually can't modify the components and swapping out components is very hard.
-2. It's highly error prone. Ensuring that they're wired together correctly is the developer's responsibility, with only limited tooling available to assist.
-3. It's unperformant. Priorities are (rightly) driven by the need to minimize development cost and mitigate deployment risk. As a result, performance rarely receives much attention, and often degrades over the lifetime of a system.
+3. It's highly error prone. Ensuring that they're wired together correctly is the developer's responsibility, with only limited tooling available to assist.
+4. It's unperformant. Priorities are (rightly) driven by the need to minimize development cost and mitigate deployment risk. As a result, performance rarely receives much attention, and often degrades over the lifetime of a system.
 
 So, in practice, the systems we build often end up brittle and we end up unsatisfied. But why is this the case? Is it a necessary consequence of building complex systems? We don't think so. We think it happens for a specific reason.
 
@@ -115,7 +115,7 @@ In practice, that brittleness manifests in many ways.
 
 *Cross-component Optimizations*
 - "Push a filter down"—you want to fetch less data, but it requires changing the API contract at every layer between UI and database
-- "Reorder a join"-changing the order in which lookups are done can massively reduce processing, but might require moving logic between components in a very awkward way.
+- "Reorder a join"—changing the order in which lookups are done can massively reduce processing, but might require moving logic between components in a very awkward way.
 - Move some logic from app to database (or vice versa)—rewrite in a different language, re-test, hope semantics match
 
 *Ceremony and risk around changes*
@@ -157,7 +157,7 @@ This creates major opportunities for verification, optimization, and automation.
 
 There are many examples of such models that allow one to build coherent systems within specific domains: 
 - Type systems in programming languages catch many logic errors and interface misuses
-- The relational model in databases enable programmers to access incredible scale and performance with minimal effort.
+- The relational model in databases enables programmers to access incredible scale and performance with minimal effort.
 - Web frameworks like Rails, Express, and Django and Backends-as-a-Service like Firebase, Supabase, and Convex eliminate a great deal of the toil and errors of building web services.
 - Actor systems like Erlang or Ray make it easier to build certain kinds of distributed systems.
 - "durable execution" systems like Temporal and ReState make fault tolerance more approachable.
@@ -187,7 +187,7 @@ If it were possible, wouldn't one already exist?
 You might speculate that there's an inherent tradeoff between generality and how high-level a model can be.
 Looking at the current population of models, we do observe such a trend empirically.
 But it doesn't seem strictly necessary.
-In this article, many of the examples we've referred to are both general-purpose and sealed models.
+In this post, many of the examples we've referred to are both general-purpose and sealed models.
 The C language exists in the stack of nearly all modern software.
 Linux is ubiquitous, only inappropriate in rare circumstances like hard-real-time and safety-critical systems.
 Relational databases are nearly as ubiquitous, with NoSQL DBs comprising only a small proportion of usage and applications only rarely needing to reach for models below that level.
@@ -208,7 +208,7 @@ This is what we're building: a high-level, general-purpose, sealed model for int
 It's a bet against the conventional wisdom that says "use the right tool for the job" and accept the resulting fragmentation.
 We believe coherence doesn't have to be sacrificed for generality—and that the payoff for achieving both is immense.
 
-Of course, we're not the first to attempt this. Many have tried to build general-purpose, high-level models for software development. Most either sacrificed generality to achieve coherence, or sacrificed high-level semantics to achieve generality. The ones that achieved both often failed to become sealed—-they leaked too often to displace lower-level alternatives.
+Of course, we're not the first to attempt this. Many have tried to build general-purpose, high-level models for software development. Most either sacrificed generality to achieve coherence, or sacrificed high-level semantics to achieve generality. The ones that achieved both often failed to become sealed—they leaked too often to displace lower-level alternatives.
 So why do we think we can succeed? We'll share more about our approach in the future. For now, we'll just say: we believe recent advances in programming language theory and database systems have opened a path that wasn't available before.
 
 ---
@@ -220,7 +220,7 @@ That's the core argument. But there's a question we expect many readers are alre
 We've been speaking of tooling in the abstract, and using examples of traditional tooling.
 But the most powerful form of tooling emerged only recently in the form of agentic AI.
 Agents are much more flexible than traditional forms of tooling, and they have tremendous potential for improving the productivity of developers.
-They already represent a revolution in software development, and into fields far beyond.
+They already represent a revolution in software development, and in many fields beyond.
 
 Given this, there's a popular narrative that AI itself is sufficient to realize the opportunities referenced above.
 In this narrative, code is merely a by-product, an intermediate representation of the programmer's intent, the truth of which is captured by the prose prompts and documents that are provided to the agents.
@@ -235,7 +235,7 @@ The first misunderstanding is the conflation of ambiguity and abstractness.
 Code is often "low level", in the sense of "it doesn't map well to the concepts in my domain". 
 But this is not an inherent property of all code. It's a property of the model being used.
 Some models are low-level, some are high-level. But code can be either.
-What code is truly about is precision. Code has semantics—-it's unambiguous. 
+What code is truly about is precision. Code has semantics—it's unambiguous. 
 It's easy to understand why someone would unintentionally conflate ambiguity and abstraction. The distinction is nuanced.
 Both mean "a single statement that could refer to multiple meanings". But the meanings of an ambiguous statement are not constrained by anything. 
 In contrast, the meanings of an abstract statement are very tightly constrained by the semantics of the relevant model.
@@ -247,14 +247,13 @@ But code will never be obviated by prose because precision will always be import
 
 The second misunderstanding relates to levels of abstraction. Saying that a programmer will work with an AI in terms of prose leaves out the concepts they will use for that communication.
 Even in prose, models will always be important.
-Without layers of abstraction, complexity grows combinatorially. No matter how fast AI get smarter, combinatorial explosions can always grow faster.
+Without layers of abstraction, complexity grows combinatorially. No matter how fast AI gets smarter, combinatorial explosions can always grow faster.
 The only way to make progress is to find ways to reduce the exponential into polynomial amounts of work.
 That's what the difference between fragmented and coherent systems is all about.
 The distinction will never become irrelevant, no matter who is building the system.
 We will just keep building better and better models, extending the reach of coherence to ever greater heights.
 
-There is substantial evidence for this view if you look at where agentic coding is most powerful today. 
-It's when working within narrow environments with clear rules, such as:
+There is substantial evidence for this view: agentic coding is most powerful when working within narrow environments with clear rules, such as:
 - Stateless, single-page javascript apps
 - Standard 3-tier architectures using a good web framework
 - Clearly-articulated analytics tasks within a single, well-documented data warehouse
